@@ -23,6 +23,7 @@ build-sanitize-thread/
 
 models/*
 *.bin
+ame_work
 
 /main
 /quantize

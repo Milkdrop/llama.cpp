@@ -12,8 +12,6 @@
 #include "ggml.h"
 #ifdef GGML_USE_CUBLAS
 #include "ggml-cuda.h"
-#elif defined(GGML_USE_CLBLAST)
-#include "ggml-opencl.h"
 #endif
 
 #include <array>
@@ -502,6 +500,7 @@ struct llama_file_loader {
                 case GGML_TYPE_Q5_0:
                 case GGML_TYPE_Q5_1:
                 case GGML_TYPE_Q8_0:
+                case GGML_TYPE_Q4_X:
                     break;
                 default: {
                     throw format("unrecognized tensor type %u\n", shard.type);
@@ -577,6 +576,7 @@ struct llama_file_saver {
             case GGML_TYPE_Q5_0:
             case GGML_TYPE_Q5_1:
             case GGML_TYPE_Q8_0:
+            case GGML_TYPE_Q4_X:
                 break;
             default: LLAMA_ASSERT(false);
         }
@@ -722,6 +722,7 @@ struct llama_model_loader {
             lt.data = (uint8_t *) lt.ggml_tensor->data;
             load_data_for(lt);
             lt.ggml_tensor->data = lt.data;
+            
             done_size += lt.size;
             if (use_mmap && lmlock) {
                 lmlock->grow_to(done_size);
@@ -730,6 +731,9 @@ struct llama_model_loader {
     }
 
     void load_data_for(llama_load_tensor & lt) {
+        //fprintf(stderr, "loading tensor: %s, %zu elems, use_mmap: %d\n", lt.name.c_str(), lt.size, use_mmap);
+        //fflush(stderr);
+
         if (use_mmap) {
             LLAMA_ASSERT(lt.shards.size() == 1);
             lt.data = (uint8_t *) mapping->addr + lt.shards.at(0).file_off;
@@ -887,6 +891,7 @@ static const char *llama_ftype_name(enum llama_ftype ftype) {
         case LLAMA_FTYPE_ALL_F32:     return "all F32";
         case LLAMA_FTYPE_MOSTLY_F16:  return "mostly F16";
         case LLAMA_FTYPE_MOSTLY_Q4_0: return "mostly Q4_0";
+        case LLAMA_FTYPE_MOSTLY_Q4_X: return "mostly Q4_X";
         case LLAMA_FTYPE_MOSTLY_Q4_1: return "mostly Q4_1";
         case LLAMA_FTYPE_MOSTLY_Q4_1_SOME_F16:
                                       return "mostly Q4_1, some F16";
@@ -975,6 +980,8 @@ static void llama_model_load_internal(
     if (vocab_only) {
         return;
     }
+
+    printf("loading model...\n");
 
     auto & ctx = model.ctx;
 
@@ -1094,7 +1101,7 @@ static void llama_model_load_internal(
             fprintf(stderr, "%s: [cublas] offloading output layer to GPU\n", __func__);
         }
         fprintf(stderr, "%s: [cublas] total VRAM used: %zu MB\n", __func__, vram_total / 1024 / 1024);
-#elif !defined(GGML_USE_CLBLAST)
+#else
         (void) n_gpu_layers;
 #endif
     }
@@ -1104,6 +1111,7 @@ static void llama_model_load_internal(
         model.tensors_by_name.emplace_back(lt.name, lt.ggml_tensor);
     }
 
+    printf("loaded model skeleton\n");
     ml->load_all_data(progress_callback, progress_callback_user_data, use_mlock ? &lctx.model.mlock_mmap : NULL);
 
 #ifdef GGML_USE_CUBLAS
@@ -1127,33 +1135,7 @@ static void llama_model_load_internal(
             done_size += lt.size;
         }
     }
-#elif defined(GGML_USE_CLBLAST)
-    {
-        const int n_gpu = std::min(n_gpu_layers, int(hparams.n_layer));
-
-        fprintf(stderr, "ggml_opencl: offloading %d layers to GPU\n", n_gpu);
-
-        size_t vram_total = 0;
-
-        for (int i = 0; i < n_gpu; ++i) {
-            const auto & layer = model.layers[i];
-
-            ggml_cl_transform_tensor(layer.wq); vram_total += ggml_nbytes(layer.wq);
-            ggml_cl_transform_tensor(layer.wk); vram_total += ggml_nbytes(layer.wk);
-            ggml_cl_transform_tensor(layer.wv); vram_total += ggml_nbytes(layer.wv);
-            ggml_cl_transform_tensor(layer.wo); vram_total += ggml_nbytes(layer.wo);
-            ggml_cl_transform_tensor(layer.w1); vram_total += ggml_nbytes(layer.w1);
-            ggml_cl_transform_tensor(layer.w2); vram_total += ggml_nbytes(layer.w2);
-            ggml_cl_transform_tensor(layer.w3); vram_total += ggml_nbytes(layer.w3);
-        }
-        if (n_gpu_layers > (int) hparams.n_layer) {
-            fprintf(stderr, "ggml_opencl: offloading output layer to GPU\n");
-            ggml_cl_transform_tensor(model.output); vram_total += ggml_nbytes(model.output);
-        }
-
-        fprintf(stderr, "ggml_opencl: total VRAM used: %zu MB\n", vram_total / 1024 / 1024);
-    }
-#endif
+#endif // GGML_USE_CUBLAS
 
     if (progress_callback) {
         progress_callback(1.0f, progress_callback_user_data);
@@ -2052,6 +2034,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
     ggml_type quantized_type;
     switch (ftype) {
         case LLAMA_FTYPE_MOSTLY_Q4_0: quantized_type = GGML_TYPE_Q4_0; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_X: quantized_type = GGML_TYPE_Q4_X; break;
         case LLAMA_FTYPE_MOSTLY_Q4_1: quantized_type = GGML_TYPE_Q4_1; break;
         case LLAMA_FTYPE_MOSTLY_Q5_0: quantized_type = GGML_TYPE_Q5_0; break;
         case LLAMA_FTYPE_MOSTLY_Q5_1: quantized_type = GGML_TYPE_Q5_1; break;
@@ -2062,6 +2045,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
     if (nthread <= 0) {
         nthread = std::thread::hardware_concurrency();
     }
+    printf("nthread: %d\n", nthread);
 
     std::unique_ptr<llama_model_loader> model_loader(new llama_model_loader(fname_inp, /*use_mmap*/ false,
                                                                             /*vocab_only*/ false));
@@ -2118,8 +2102,40 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
                 f32_conv_buf.resize(nelements * sizeof(float));
                 f32_data = (float *) f32_conv_buf.addr;
                 const auto * f16_data = (const ggml_fp16_t *) tensor.data;
-                for (size_t i = 0; i < nelements; i++) {
-                    f32_data[i] = ggml_fp16_to_fp32(f16_data[i]);
+
+
+                if ((tensor.ne.at(0) == 4096 && tensor.ne.at(1) == 4096)
+                    && false && (
+                    tensor.name.find(std::string("12")) != std::string::npos
+                    || tensor.name.find(std::string("1.")) != std::string::npos
+                    // || tensor.name.find(std::string("13")) != std::string::npos
+                    // || tensor.name.find(std::string("14")) != std::string::npos
+                    // || tensor.name.find(std::string("15")) != std::string::npos
+                    // || tensor.name.find(std::string("20")) != std::string::npos
+                    // || tensor.name.find(std::string("21")) != std::string::npos
+                    // || tensor.name.find(std::string("22")) != std::string::npos
+                    // || tensor.name.find(std::string("23")) != std::string::npos
+                    // || tensor.name.find(std::string("28")) != std::string::npos
+                    // || tensor.name.find(std::string("29")) != std::string::npos
+                    // || tensor.name.find(std::string("30")) != std::string::npos
+                    // || tensor.name.find(std::string("31")) != std::string::npos
+                )) {
+                    std::string fname = "ame_work/weights/";
+                    fname += tensor.name;
+                    printf("\nprinting to file %s\n", fname.c_str());
+
+                    FILE* f = fopen(fname.c_str(), "w");
+
+                    for (size_t i = 0; i < nelements; i++) {
+                        f32_data[i] = ggml_fp16_to_fp32(f16_data[i]);
+                        fprintf(f, "%f %u\n", f32_data[i], f16_data[i]);
+                    }
+
+                    fclose(f);
+                } else {
+                    for (size_t i = 0; i < nelements; i++) {
+                        f32_data[i] = ggml_fp16_to_fp32(f16_data[i]);
+                    }
                 }
             } else {
                 throw format("type %s unsupported for integer quantization", ggml_type_name(tensor.type));
@@ -2135,6 +2151,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
             int chunk_size = 32 * 512;
             const int nchunk = (nelements + chunk_size - 1)/chunk_size;
             const int nthread_use = nthread > 1 ? std::max(1, std::min(nthread, nchunk)) : 1;
+
             if (nthread_use < 2) {
                 new_size = ggml_quantize_chunk(new_type, f32_data, new_data, 0, nelements, hist_cur.data());
             } else {

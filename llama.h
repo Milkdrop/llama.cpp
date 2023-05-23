@@ -89,6 +89,7 @@ extern "C" {
         LLAMA_FTYPE_MOSTLY_Q8_0          = 7, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_Q5_0          = 8, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_Q5_1          = 9, // except 1d tensors
+        LLAMA_FTYPE_MOSTLY_Q4_X          = 10,
     };
 
     LLAMA_API struct llama_context_params llama_context_default_params();
