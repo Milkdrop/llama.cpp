@@ -305,6 +305,15 @@ static size_t llama_calc_tensor_size(const std::vector<uint32_t> & ne, enum ggml
     return size / ggml_blck_size(type);
 }
 
+static size_t llama_calc_mixed_q_tensor_size(uint32_t total_elems, uint32_t total_fp16s) {
+    size_t tensor_size = 0;
+    uint32_t total_qs = total_elems - total_fp16s;
+    GGML_ASSERT(total_qs % (8 / QK4_QBits) == 0);
+
+    tensor_size = total_fp16s * 2 + total_qs / (8 / QK4_QBits); // weights
+    tensor_size += total_elems / 8; // 1 bit for every weight to signal if it's 16bit or Q'd
+}
+
 struct llama_load_tensor_shard {
     std::vector<uint32_t> ne;
     size_t size;
@@ -507,6 +516,11 @@ struct llama_file_loader {
                 }
             }
 
+            if (shard.type == GGML_TYPE_Q4_X) {
+                uint32_t extra_data[shard.ne[1]];
+                file.read_raw(extra_data, sizeof(uint32_t) * shard.ne[1]);
+            }
+
             if (file_version >= LLAMA_FILE_VERSION_GGJT_V1) {
                 // skip to the next multiple of 32 bytes
                 file.seek(-static_cast<ptrdiff_t>(file.tell()) & 31, SEEK_CUR);
@@ -514,7 +528,14 @@ struct llama_file_loader {
             shard.file_idx = file_idx;
             shard.file_off = file.tell();
 
-            shard.calc_size();
+            if (shard.type == GGML_TYPE_Q4_X) {
+                shard.size = 0;
+                tensor_size = total_fp16s * 2 + total_qs / (8 / QK4_QBits); // weights
+                tensor_size += total_elems / 8; // 1 bit for every weight to signal if it's 16bit or Q'd
+            } else {
+                shard.calc_size();
+            }
+
             file.seek(shard.size, SEEK_CUR);
 
             auto it = tensors_map.name_to_idx.find(name);
@@ -567,7 +588,7 @@ struct llama_file_saver {
             file.write_raw(&token_score.score, sizeof(token_score.score));
         }
     }
-    void write_tensor(llama_load_tensor & tensor, enum ggml_type new_type, const void * new_data, size_t new_size) {
+    void write_tensor(llama_load_tensor & tensor, enum ggml_type new_type, const void * new_data, size_t new_size, const void * extra_data) {
         switch (new_type) {
             case GGML_TYPE_F32:
             case GGML_TYPE_F16:
@@ -585,8 +606,31 @@ struct llama_file_saver {
         file.write_u32(new_type);
         file.write_raw(tensor.ne.data(), sizeof(tensor.ne[0]) * tensor.ne.size());
         file.write_raw(tensor.name.data(), tensor.name.size());
+
+        size_t tensor_size;
+
+        if (new_type == GGML_TYPE_Q4_X) {
+            printf("writing %s\n", tensor.name.c_str());
+            printf("tensor.ggml_tensor: %p\n", tensor.ggml_tensor);
+            printf("extra_data: %p\n", extra_data);
+
+            file.write_raw(extra_data, sizeof(uint32_t) * tensor.ne[1]);
+            
+            // measure size
+            uint32_t total_fp16s = ((uint32_t *) extra_data)[tensor.ne[1] - 1];
+
+            GGML_ASSERT(tensor.ne.size() == 2);
+            uint32_t total_elems = tensor.ne[0] * tensor.ne[1];
+            
+            tensor_size = llama_calc_mixed_q_tensor_size(total_elems, total_fp16s);
+            //printf("total fp16s: %u, total_qs: %u, total_elems: %u, weight bits: %u\n", total_fp16s, total_qs, total_elems, (tensor.ne[0] * tensor.ne[1]) / 8);
+        } else {
+            tensor_size = llama_calc_tensor_size(tensor.ne, new_type);
+        }
+
         file.seek(-static_cast<ptrdiff_t>(file.tell()) & 31, SEEK_CUR);
-        LLAMA_ASSERT(new_size == llama_calc_tensor_size(tensor.ne, new_type));
+        printf("new_size %d vs tensor size %d\n", new_size, tensor_size);
+        LLAMA_ASSERT(new_size == tensor_size);
         file.write_raw(new_data, new_size);
     }
 };
@@ -679,6 +723,9 @@ struct llama_model_loader {
         tensor->backend = backend;
         lt.ggml_tensor = tensor;
         num_ggml_tensors_created++;
+        
+        printf("get_tensor: %s, %d x %d\n", tensor->name, tensor->ne[0], tensor->ne[1]);
+
         return tensor;
     }
 
@@ -712,6 +759,9 @@ struct llama_model_loader {
 
         size_t done_size = 0;
         for (llama_load_tensor & lt : tensors_map.tensors) {
+            fprintf(stderr, "Loading tensor %s\n", lt.name.c_str());
+            fflush(stderr);
+
             if (lt.ggml_tensor->backend != GGML_BACKEND_CPU) {
                 continue;
             }
@@ -737,6 +787,11 @@ struct llama_model_loader {
         if (use_mmap) {
             LLAMA_ASSERT(lt.shards.size() == 1);
             lt.data = (uint8_t *) mapping->addr + lt.shards.at(0).file_off;
+
+            // if (tensor->type == GGML_TYPE_Q4_X && tensor->ne[1] > 1) {
+            //     tensor->extra_data = (uint32_t*) ggml_aligned_malloc(sizeof(uint32_t) * tensor->ne[0]);
+            //     // ->data is still null here
+            // }
         } else if (lt.split_type == SPLIT_NONE) {
             llama_file & file = file_loaders.at(lt.shards.at(0).file_idx)->file;
             file.seek(lt.shards.at(0).file_off, SEEK_SET);
@@ -2045,6 +2100,13 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
     if (nthread <= 0) {
         nthread = std::thread::hardware_concurrency();
     }
+
+    // this is preferred since the data isn't really easy to section up, esp. when we don't know how long (in bits) a row is yet
+    if (quantized_type == GGML_TYPE_Q4_X) {
+        nthread = 1;
+        printf("Setting nthread to 1 due to Q4_X quantization type.\n");
+    }
+
     printf("nthread: %d\n", nthread);
 
     std::unique_ptr<llama_model_loader> model_loader(new llama_model_loader(fname_inp, /*use_mmap*/ false,
@@ -2072,10 +2134,17 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
 
         // This used to be a regex, but <regex> has an extreme cost to compile times.
         bool quantize = tensor.name.rfind("weight") == tensor.name.size() - 6; // ends with 'weight'?
+        
+        // consider tok_embeddings.weight and output.weight
+
+        // quantize only 2D attention and FFN stuffs
+        if (tensor.name.find("attention") == std::string::npos && tensor.name.find("feed_forward") == std::string::npos) {
+            quantize = false;
+        }
 
         // quantize only 2D tensors
         quantize &= (tensor.ne.size() == 2);
-
+        
         // uncomment this to keep the output layer in FP16
         //if (tensor.name == "output.weight") {
         //    quantize = false;
@@ -2085,6 +2154,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
         void * new_data;
         size_t new_size;
         llama_buffer work;
+        uint32_t * extra_data = NULL;
 
         if (!quantize) {
             new_type = tensor.type;
@@ -2094,20 +2164,33 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
         } else {
             new_type = quantized_type;
             float * f32_data;
+            const ggml_fp16_t * f16_data;
+
             size_t nelements = tensor.ne.at(0) * tensor.ne.at(1);
             llama_buffer f32_conv_buf;
             if (tensor.type == GGML_TYPE_F32) {
                 f32_data = (float *) tensor.data;
+                f16_data = NULL;
             } else if (tensor.type == GGML_TYPE_F16) {
                 f32_conv_buf.resize(nelements * sizeof(float));
                 f32_data = (float *) f32_conv_buf.addr;
-                const auto * f16_data = (const ggml_fp16_t *) tensor.data;
+                f16_data = (ggml_fp16_t *) tensor.data;
 
-
-                if ((tensor.ne.at(0) == 4096 && tensor.ne.at(1) == 4096)
-                    && false && (
-                    tensor.name.find(std::string("12")) != std::string::npos
-                    || tensor.name.find(std::string("1.")) != std::string::npos
+                if (false
+                    // tensor.name.find(std::string(".1.attention.wq")) != std::string::npos
+                    // tensor.name.find(std::string(".15.attention.wq")) != std::string::npos
+                    // || tensor.name.find(std::string(".15.attention.wv")) != std::string::npos
+                    // || tensor.name.find(std::string(".15.attention.wo")) != std::string::npos
+                    // || tensor.name.find(std::string(".0.feed_forward")) != std::string::npos
+                    // || tensor.name.find(std::string(".15.feed_forward")) != std::string::npos
+                    // || tensor.name.find(std::string(".31.feed_forward")) != std::string::npos
+                    // || tensor.name.find(std::string(".2.feed_forward")) != std::string::npos
+                    // || tensor.name.find(std::string(".3.feed_forward")) != std::string::npos
+                    // || tensor.name.find(std::string(".8.feed_forward")) != std::string::npos
+                    // || tensor.name.find(std::string(".13.feed_forward")) != std::string::npos
+                    // || tensor.name.find(std::string(".15.feed_forward")) != std::string::npos
+                    //tensor.name.find(std::string(".27.feed_forward")) != std::string::npos
+                    // || tensor.name.find(std::string(".31.feed_forward")) != std::string::npos
                     // || tensor.name.find(std::string("13")) != std::string::npos
                     // || tensor.name.find(std::string("14")) != std::string::npos
                     // || tensor.name.find(std::string("15")) != std::string::npos
@@ -2119,7 +2202,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
                     // || tensor.name.find(std::string("29")) != std::string::npos
                     // || tensor.name.find(std::string("30")) != std::string::npos
                     // || tensor.name.find(std::string("31")) != std::string::npos
-                )) {
+                ) {
                     std::string fname = "ame_work/weights/";
                     fname += tensor.name;
                     printf("\nprinting to file %s\n", fname.c_str());
@@ -2152,12 +2235,16 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
             const int nchunk = (nelements + chunk_size - 1)/chunk_size;
             const int nthread_use = nthread > 1 ? std::max(1, std::min(nthread, nchunk)) : 1;
 
+            if (new_type == GGML_TYPE_Q4_X) {
+                extra_data = (uint32_t *) ggml_aligned_malloc(sizeof(uint32_t) * tensor.ne[1]);
+            }
+
             if (nthread_use < 2) {
-                new_size = ggml_quantize_chunk(new_type, f32_data, new_data, 0, nelements, hist_cur.data());
+                new_size = ggml_quantize_chunk(new_type, f16_data, f32_data, new_data, 0, nelements, hist_cur.data(), extra_data, tensor.ne[0]);
             } else {
                 size_t counter = 0;
                 new_size = 0;
-                auto compute = [&mutex, &counter, &hist_cur, &new_size, new_type, f32_data, new_data, nelements, chunk_size] () {
+                auto compute = [&mutex, &counter, &hist_cur, extra_data, &new_size, tensor, new_type, f16_data, f32_data, new_data, nelements, chunk_size] () {
                     std::vector<int64_t> local_hist;
                     size_t local_size = 0;
                     while (true) {
@@ -2177,7 +2264,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
                         if (local_hist.empty()) {
                             local_hist.resize(hist_cur.size(), 0);
                         }
-                        local_size += ggml_quantize_chunk(new_type, f32_data, new_data, first, last - first, local_hist.data());
+                        local_size += ggml_quantize_chunk(new_type, f16_data, f32_data, new_data, first, last - first, local_hist.data(), extra_data, tensor.ne[0]);
                     }
                 };
                 if ((int) workers.size() < nthread_use - 1) {
@@ -2204,7 +2291,8 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
         }
         total_size_org += tensor.size;
         total_size_new += new_size;
-        file_saver.write_tensor(tensor, new_type, new_data, new_size);
+        
+        file_saver.write_tensor(tensor, new_type, new_data, new_size, extra_data);
     }
 
     printf("%s: model size  = %8.2f MB\n", __func__, total_size_org/1024.0/1024.0);

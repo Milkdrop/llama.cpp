@@ -37,10 +37,10 @@ void perplexity(llama_context * ctx, const gpt_params & params) {
     double nll = 0.0;
     fprintf(stderr, "%s: calculating perplexity over %d chunks, batch_size=%d\n", __func__, n_chunk, n_batch);
 
-    if (n_chunk > 50) {
-        fprintf(stderr, "n_chunk originally: %d, reduced to 50.\n", n_chunk);
-        n_chunk = 50;
-    }
+    // if (n_chunk > 50) {
+    //     fprintf(stderr, "n_chunk originally: %d, reduced to 50.\n", n_chunk);
+    //     n_chunk = 50;
+    // }
 
     for (int i = 0; i < n_chunk; ++i) {
         const int start =     i * params.n_ctx;

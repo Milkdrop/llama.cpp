@@ -186,6 +186,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdlib.h>
 
 #define GGML_FILE_MAGIC   0x67676d6c // "ggml"
 #define GGML_FILE_VERSION 1
@@ -210,6 +211,32 @@
 
 #ifdef  __cplusplus
 extern "C" {
+#endif
+
+#define QK4_X 64
+#define QK4_QBits 4
+
+#if UINTPTR_MAX == 0xFFFFFFFF
+    #define GGML_MEM_ALIGN 4
+#else
+    #define GGML_MEM_ALIGN 16
+#endif
+
+#if defined(_MSC_VER) || defined(__MINGW32__)
+#define GGML_ALIGNED_MALLOC(size)  _aligned_malloc(size, GGML_MEM_ALIGN)
+#define GGML_ALIGNED_FREE(ptr)     _aligned_free(ptr)
+#else
+inline static void* ggml_aligned_malloc(size_t size) {
+    void* aligned_memory = NULL;
+    int result = posix_memalign(&aligned_memory, GGML_MEM_ALIGN, size);
+    if (result != 0) {
+        // Handle allocation failure
+        return NULL;
+    }
+    return aligned_memory;
+}
+#define GGML_ALIGNED_MALLOC(size)  ggml_aligned_malloc(size)
+#define GGML_ALIGNED_FREE(ptr)     free(ptr)
 #endif
 
 #ifdef __ARM_NEON
@@ -372,10 +399,11 @@ extern "C" {
         int64_t perf_time_us;
 
         void * data;
-
+        void * extra_data;
+        
         char name[32];
 
-        char padding[16];
+        char padding[8];
     };
 
     // computation graph
@@ -1081,13 +1109,13 @@ extern "C" {
     //
 
     GGML_API size_t ggml_quantize_q4_0(const float * src, void * dst, int n, int k, int64_t * hist);
-    GGML_API size_t ggml_quantize_q4_x(const float * src, void * dst, int n, int k, int64_t * hist);
+    GGML_API size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst, int n, int k, int64_t * hist, uint32_t * extra_data, uint32_t tensor_width);
     GGML_API size_t ggml_quantize_q4_1(const float * src, void * dst, int n, int k, int64_t * hist);
     GGML_API size_t ggml_quantize_q5_0(const float * src, void * dst, int n, int k, int64_t * hist);
     GGML_API size_t ggml_quantize_q5_1(const float * src, void * dst, int n, int k, int64_t * hist);
     GGML_API size_t ggml_quantize_q8_0(const float * src, void * dst, int n, int k, int64_t * hist);
 
-    GGML_API size_t ggml_quantize_chunk(enum ggml_type type, const float * src, void * dst, int start, int n, int64_t * hist);
+    GGML_API size_t ggml_quantize_chunk(enum ggml_type type, const ggml_fp16_t * src_raw, const float * src, void * dst, int start, int n, int64_t * hist, uint32_t * extra_data, uint32_t tensor_width);
 
     //
     // system info
