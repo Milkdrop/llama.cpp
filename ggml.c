@@ -15695,7 +15695,7 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
             ggml_fp16_t x = src[i * QK4_X + j];
             float x_fp32 = GGML_FP16_TO_FP32(x);
 
-            if (fabsf(x_fp32) > thresh || true) {
+            if (fabsf(x_fp32) > thresh) {
                 fp16s[j / 64] |= (uint64_t) 1 << (j % 64);
                 fp16_count += 1;
                 //printf("%d.%d: %f should be f16\n", i, j, x_fp32);
