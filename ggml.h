@@ -268,14 +268,16 @@ inline static void* ggml_aligned_malloc(size_t size) {
 //     }
 // }
 
-inline static void get_bits(uint32_t * src, uint32_t bit_offset, uint16_t * data, uint16_t bit_count) {
+inline static void get_bits(const uint32_t * src, uint16_t bit_offset, uint16_t * data, uint16_t bit_count) {
     const uint32_t chunk_size = (sizeof(uint32_t) * 8);
 
     const uint32_t chunk_id = bit_offset / chunk_size;
     src = src + chunk_id;
-    bit_offset %= (sizeof(uint32_t) * 8);
+    bit_offset %= chunk_size;
 
-    if (bit_offset + bit_count > chunk_size) {
+    if (bit_offset + bit_count <= chunk_size) {
+        *data = (*src >> bit_offset) & ((1 << bit_count) - 1);
+    } else {
         // first fill the current chunk
         uint16_t bitcount_1 = chunk_size - bit_offset;
 
@@ -287,8 +289,6 @@ inline static void get_bits(uint32_t * src, uint32_t bit_offset, uint16_t * data
         src += 1;
 
         *data |= (*src & ((1 << bit_count) - 1)) << bitcount_1;
-    } else {
-        *data = (*src >> bit_offset) & ((1 << bit_count) - 1);
     }
 }
 

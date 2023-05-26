@@ -2199,23 +2199,45 @@ static void ggml_vec_dot_q4_x_q8_0(uint8_t * row_data, const uint16_t row_width,
     const block_q8_0 * restrict column = column_ptr;
 
     // todo
+    uint32_t nb = row_width / QK4_X;
+    float qvals[1 << QK4_QBits] = {-0.4, -0.2, -0.05, -0.02, -0.01, -0.005, -0.00025, -0.0001,
+                                    0.4,  0.2,  0.05,  0.02,  0.01,  0.005,  0.00025,  0.0001};
+
+    double sumf = 0.0;
+    GGML_ASSERT(QK4_X % QK8_0 == 0);
+    
     if (false) {
-        // #if defined(__AVX2__)
+        #if !defined(__AVX2__)
+            fprintf(stderr, "Missing AVX2! Please disable it in ggml_vec_dot_q4_x_q8_0");
+            fflush(stderr);
+            GGML_ASSERT(false);
+        #endif
 
-        // #else
-        // printf("Missing AVX2! This might be really slow.");
-        // GGML_ASSERT(false);
-        // #endif
+        // Initialize accumulator with zeros
+
+        // __m256 acc = _mm256_setzero_ps();
+
+        // // Main loop
+        // for (int i = 0; i < nb; ++i) {
+        //     /* Compute combined scale for the block */
+        //     const __m256 d = _mm256_set1_ps( GGML_FP16_TO_FP32(x[i].d) * GGML_FP16_TO_FP32(y[i].d) );
+
+        //     __m256i bx = bytes_from_nibbles_32(x[i].qs);
+
+        //     // Now we have a vector with bytes in [ 0 .. 15 ] interval. Offset them into [ -8 .. +7 ] interval.
+        //     const __m256i off = _mm256_set1_epi8( 8 );
+        //     bx = _mm256_sub_epi8( bx, off );
+
+        //     __m256i by = _mm256_loadu_si256((const __m256i *)y[i].qs);
+
+        //     const __m256 q = mul_sum_i8_pairs_float(bx, by);
+
+        //     /* Multiply q with scale and accumulate */
+        //     acc = _mm256_fmadd_ps( d, q, acc );
+        // }
+
+        // *s = hsum_float_8(acc);
     } else {
-
-        uint32_t nb = row_width / QK4_X;
-        float qvals[1 << QK4_QBits] = {-0.4, -0.2, -0.05, -0.02, -0.01, -0.005, -0.00025, -0.0001,
-                                        0.4,  0.2,  0.05,  0.02,  0.01,  0.005,  0.00025,  0.0001};
-
-        double sumf = 0.0;
-        GGML_ASSERT(QK4_X % QK8_0 == 0);
-        GGML_ASSERT(QK8_0 < sizeof(uint64_t) * 8);
-
         for (int b = 0; b < nb; b++) {
             uint64_t * block_start = (uint64_t *) row_data;
             uint32_t * data_start = (uint32_t *) (block_start + (QK4_X / 64));
@@ -2227,14 +2249,14 @@ static void ggml_vec_dot_q4_x_q8_0(uint8_t * row_data, const uint16_t row_width,
                 double sum_b = 0.0;
                 const uint32_t block_id = b * (QK4_X / QK8_0) + jb;
 
-                uint64_t fp16_data = block_start[(jb * QK8_0) / 64] >> ((jb & 1) * QK8_0);
                 for (int i = 0; i < QK8_0; i++) {
-                    //const uint16_t j = jb * QK8_0 + i;
+                    const uint16_t j = jb * QK8_0 + i;
 
                     // for some reason, an "if" statement here slows down the code a lot,
                     // probably because of constant branch misprediction; so we are storing
                     // if the weight is in 16bit in a variable
-                    const uint8_t sz = QK4_QBits << ((fp16_data & 1) << 1);
+                    const uint8_t is_fp16 = (block_start[j / 64] >> (j % 64)) & 1;
+                    const uint8_t sz = QK4_QBits << (is_fp16 << 1);
 
                     uint16_t w = 0;
                     get_bits(data_start, offset, &w, sz);
@@ -2257,7 +2279,6 @@ static void ggml_vec_dot_q4_x_q8_0(uint8_t * row_data, const uint16_t row_width,
                     // }
 
                     // printf(" x %f = %lf\n", y_elem, sum_b);
-                    fp16_data >>= 1;
                 }
 
                 sumf += sum_b * GGML_FP16_TO_FP32(column[block_id].d);
@@ -2281,6 +2302,26 @@ static void ggml_vec_dot_q4_0_q8_0(const int n, float * restrict s, const void *
 
     const block_q4_0 * restrict x = vx;
     const block_q8_0 * restrict y = vy;
+
+    // forced slow implemenation, for benchmarking
+    // scalar
+    float sumf = 0.0;
+
+    for (int i = 0; i < nb; i++) {
+        int sumi = 0;
+
+        for (int j = 0; j < qk/2; ++j) {
+            const int v0 = (x[i].qs[j] & 0x0F) - 8;
+            const int v1 = (x[i].qs[j] >>   4) - 8;
+
+            sumi += (v0 * y[i].qs[j]) + (v1 * y[i].qs[j + qk/2]);
+        }
+
+        sumf += sumi*GGML_FP16_TO_FP32(x[i].d)*GGML_FP16_TO_FP32(y[i].d);
+    }
+
+    *s = sumf;
+    return;
 
 #if defined(__ARM_NEON)
     float32x4_t sumv0 = vdupq_n_f32(0.0f);
