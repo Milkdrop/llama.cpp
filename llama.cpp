@@ -1235,17 +1235,31 @@ static void llama_model_load_internal(
     }
 #endif // GGML_USE_CUBLAS
 
-    if (model.layers[0].w2->type == GGML_TYPE_Q4_X) {
-        ggml_tensor * tensor = model.layers[0].w2;
+    // if (model.layers[0].w2->type == GGML_TYPE_Q4_X) {
+    //     ggml_tensor * tensor = model.layers[0].w2;
         
-        printf("data for %s:\n", tensor->name);
+    //     printf("data for %s:\n", tensor->name);
 
-        // uint8_t * data = (uint8_t*) tensor->data;
-        // printf("%x %x %x %x\n", data[0], data[1], data[2], data[3]);
-        for (int i = 0; i < 4; i++) {
-            print_tensor_qx((uint32_t * ) tensor->data, (uint32_t * ) tensor->extra_data, tensor->ne[0], i, 0);
-        }
+    //     // uint8_t * data = (uint8_t*) tensor->data;
+    //     // printf("%x %x %x %x\n", data[0], data[1], data[2], data[3]);
+    //     for (int i = 0; i < 4; i++) {
+    //         print_tensor_qx((uint32_t * ) tensor->data, (uint32_t * ) tensor->extra_data, tensor->ne[0], i, 0);
+    //     }
+    // }
+
+    // test get_bits
+    uint32_t test[4];
+    for (int i = 0; i < 4; i++) {
+        test[i] = 0;
     }
+
+    printf("test %x %x\n", test[0], test[1]);
+    write_bits(test, 29, 253, 16);
+    printf("test %x %x\n", test[0], test[1]);
+
+    uint16_t num = 0;
+    get_bits(test, 29, &num, 16);
+    printf("test %d\n", num);
 
     if (progress_callback) {
         progress_callback(1.0f, progress_callback_user_data);
