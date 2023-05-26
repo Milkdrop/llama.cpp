@@ -24,6 +24,7 @@ build-sanitize-thread/
 models/*
 *.bin
 ame_work
+callgrind*
 
 /main
 /quantize

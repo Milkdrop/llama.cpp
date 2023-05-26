@@ -2200,30 +2200,12 @@ static void ggml_vec_dot_q4_x_q8_0(uint8_t * row_data, const uint16_t row_width,
 
     // todo
     if (false) {
-        // // AVX2 implemenation
-        // // Initialize accumulator with zeros
-        // __m256 acc = _mm256_setzero_ps();
+        // #if defined(__AVX2__)
 
-        // // Main loop
-        // for (int i = 0; i < nb; ++i) {
-        //     /* Compute combined scale for the block */
-        //     const __m256 d = _mm256_set1_ps( GGML_FP16_TO_FP32(x[i].d) * GGML_FP16_TO_FP32(y[i].d) );
-
-        //     __m256i bx = bytes_from_nibbles_32(x[i].qs);
-
-        //     // Now we have a vector with bytes in [ 0 .. 15 ] interval. Offset them into [ -8 .. +7 ] interval.
-        //     const __m256i off = _mm256_set1_epi8( 8 );
-        //     bx = _mm256_sub_epi8( bx, off );
-
-        //     __m256i by = _mm256_loadu_si256((const __m256i *)y[i].qs);
-
-        //     const __m256 q = mul_sum_i8_pairs_float(bx, by);
-
-        //     /* Multiply q with scale and accumulate */
-        //     acc = _mm256_fmadd_ps( d, q, acc );
-        // }
-
-        // *s = hsum_float_8(acc);
+        // #else
+        // printf("Missing AVX2! This might be really slow.");
+        // GGML_ASSERT(false);
+        // #endif
     } else {
 
         uint32_t nb = row_width / QK4_X;
@@ -2231,55 +2213,55 @@ static void ggml_vec_dot_q4_x_q8_0(uint8_t * row_data, const uint16_t row_width,
                                         0.4,  0.2,  0.05,  0.02,  0.01,  0.005,  0.00025,  0.0001};
 
         double sumf = 0.0;
-
-        uint32_t weight_idx = 0;
-
         GGML_ASSERT(QK4_X % QK8_0 == 0);
+        GGML_ASSERT(QK8_0 < sizeof(uint64_t) * 8);
 
         for (int b = 0; b < nb; b++) {
-            double sum_b = 0.0;
-
             uint64_t * block_start = (uint64_t *) row_data;
             uint32_t * data_start = (uint32_t *) (block_start + (QK4_X / 64));
             row_data = (uint8_t * ) data_start;
 
             uint32_t offset = 0;
+            
+            for (int jb = 0; jb < QK4_X / QK8_0; jb++) {
+                double sum_b = 0.0;
+                const uint32_t block_id = b * (QK4_X / QK8_0) + jb;
 
-            for (int j = 0; j < QK4_X; j++) {
-                uint8_t sz = QK4_QBits;
+                uint64_t fp16_data = block_start[(jb * QK8_0) / 64] >> ((jb & 1) * QK8_0);
+                for (int i = 0; i < QK8_0; i++) {
+                    //const uint16_t j = jb * QK8_0 + i;
 
-                if (block_start[j / 64] & ((uint64_t) 1 << (j % 64))) {
-                    sz = 16;
+                    // for some reason, an "if" statement here slows down the code a lot,
+                    // probably because of constant branch misprediction; so we are storing
+                    // if the weight is in 16bit in a variable
+                    const uint8_t sz = QK4_QBits << ((fp16_data & 1) << 1);
+
+                    uint16_t w = 0;
+                    get_bits(data_start, offset, &w, sz);
+                    offset += sz;
+
+                    int8_t y_elem = column[block_id].qs[i];
+
+                    if (sz == 16) {
+                        sum_b += GGML_FP16_TO_FP32(w) * y_elem;
+                    } else {
+                        sum_b += qvals[w] * y_elem;
+                    }
+                    
+                    // if (sz == 16) {
+                    //     printf("%02x%02xh (%f)", w >> 8, w & 0xFF, GGML_FP16_TO_FP32(w));
+                    // } else {
+                    //     for (int k = sz - 1; k >= 0; k--) {
+                    //         printf("%d (%f)", (w >> k) & 1, qvals[w]);
+                    //     }
+                    // }
+
+                    // printf(" x %f = %lf\n", y_elem, sum_b);
+                    fp16_data >>= 1;
                 }
 
-                uint16_t w = 0;
-                get_bits(data_start, offset, &w, sz);
-                offset += sz;
-
-                int8_t y_elem = column[weight_idx / QK8_0].qs[weight_idx % QK8_0];
-
-                if (sz == 16) {
-                    sum_b += GGML_FP16_TO_FP32(w) * y_elem;
-                } else {
-                    sum_b += qvals[w] * y_elem;
-                }
-
-                if ((j + 1) % QK8_0 == 0) {
-                    sumf += sum_b * GGML_FP16_TO_FP32(column[(weight_idx - 1) / QK8_0].d);
-                    sum_b = 0;
-                }
-                
-                // if (sz == 16) {
-                //     printf("%02x%02xh (%f)", w >> 8, w & 0xFF, GGML_FP16_TO_FP32(w));
-                // } else {
-                //     for (int k = sz - 1; k >= 0; k--) {
-                //         printf("%d (%f)", (w >> k) & 1, qvals[w]);
-                //     }
-                // }
-
-                // printf(" x %f = %lf\n", y_elem, sum_b);
-                
-                weight_idx += 1;
+                sumf += sum_b * GGML_FP16_TO_FP32(column[block_id].d);
+                sum_b = 0;
             }
 
             GGML_ASSERT(offset % 8 == 0);

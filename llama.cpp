@@ -1588,7 +1588,10 @@ static bool llama_eval_internal(
         lctx.t_p_eval_us += ggml_time_us() - t_start_us;
         lctx.n_p_eval += N;
     }
-
+    
+    // ame debug
+    fprintf(stderr, "\nmodel eval time: %ldms\n", (ggml_time_us() - t_start_us) / 1000);
+    fflush(stderr);
     return true;
 }
 
