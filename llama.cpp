@@ -298,6 +298,8 @@ static std::string llama_format_tensor_shape(const std::vector<uint32_t> & ne) {
 }
 
 static size_t llama_calc_tensor_size(const std::vector<uint32_t> & ne, enum ggml_type type) {
+    GGML_ASSERT(type != GGML_TYPE_Q4_X);
+
     size_t size = ggml_type_size(type);
     for (uint32_t dim : ne) {
         size = checked_mul<size_t>(size, dim);
@@ -305,24 +307,21 @@ static size_t llama_calc_tensor_size(const std::vector<uint32_t> & ne, enum ggml
     return size / ggml_blck_size(type);
 }
 
-static size_t llama_calc_mixed_q_tensor_size(uint32_t total_elems, uint32_t total_fp16s) {
-    size_t tensor_size = 0;
-    uint32_t total_qs = total_elems - total_fp16s;
-    GGML_ASSERT(total_qs % (8 / QK4_QBits) == 0);
-
-    tensor_size = total_fp16s * 2 + total_qs / (8 / QK4_QBits); // weights
-    tensor_size += total_elems / 8; // 1 bit for every weight to signal if it's 16bit or Q'd
-}
-
 struct llama_load_tensor_shard {
     std::vector<uint32_t> ne;
+    std::vector<uint32_t> extra_data;
     size_t size;
     enum ggml_type type;
     size_t file_idx;
     size_t file_off;
 
     void calc_size() {
-        size = llama_calc_tensor_size(ne, type);
+        if (type == GGML_TYPE_Q4_X) {
+            GGML_ASSERT(ne.size() == 2);
+            size = llama_calc_mixed_q_tensor_size(ne[0] * ne[1], extra_data[ne[1] - 1]);
+        } else {
+            size = llama_calc_tensor_size(ne, type);
+        }
     }
 };
 
@@ -339,6 +338,7 @@ struct llama_load_tensor {
     enum ggml_type type = GGML_TYPE_F32;
     llama_split_type split_type = SPLIT_NONE;
     std::vector<uint32_t> ne;
+    std::vector<uint32_t> extra_data;
     size_t size;
     struct ggml_tensor * ggml_tensor = NULL;
     uint8_t * data;
@@ -402,7 +402,19 @@ struct llama_load_tensor {
     }
 
     void calc_size() {
-        size = llama_calc_tensor_size(ne, type);
+        if (type == GGML_TYPE_Q4_X) {
+            GGML_ASSERT(shards.size() == 1);
+            GGML_ASSERT(ne.size() == 2);
+
+            // also get extra_data
+            extra_data = shards.at(0).extra_data;
+            //printf("calc_size: %zu\n", extra_data.size());
+            
+            size = llama_calc_mixed_q_tensor_size(ne[0] * ne[1], extra_data[ne[1] - 1]);
+            //printf("calc_size_done: %zu\n", size);
+        } else {
+            size = llama_calc_tensor_size(ne, type);
+        }
     }
 };
 
@@ -516,9 +528,10 @@ struct llama_file_loader {
                 }
             }
 
+            // load extra_data into shard
             if (shard.type == GGML_TYPE_Q4_X) {
-                uint32_t extra_data[shard.ne[1]];
-                file.read_raw(extra_data, sizeof(uint32_t) * shard.ne[1]);
+                shard.extra_data.resize(shard.ne[1]);
+                file.read_raw(shard.extra_data.data(), sizeof(uint32_t) * shard.ne[1]);
             }
 
             if (file_version >= LLAMA_FILE_VERSION_GGJT_V1) {
@@ -527,16 +540,15 @@ struct llama_file_loader {
             }
             shard.file_idx = file_idx;
             shard.file_off = file.tell();
-
-            if (shard.type == GGML_TYPE_Q4_X) {
-                shard.size = 0;
-                tensor_size = total_fp16s * 2 + total_qs / (8 / QK4_QBits); // weights
-                tensor_size += total_elems / 8; // 1 bit for every weight to signal if it's 16bit or Q'd
-            } else {
-                shard.calc_size();
-            }
+            
+            shard.calc_size();
 
             file.seek(shard.size, SEEK_CUR);
+
+            if (shard.type == GGML_TYPE_Q4_X) {
+                // skip to the next multiple of 32 bytes, since data in Q4_X may not be divisible by 32bits
+                file.seek(-static_cast<ptrdiff_t>(file.tell()) & 31, SEEK_CUR);
+            }
 
             auto it = tensors_map.name_to_idx.find(name);
             size_t idx;
@@ -548,6 +560,14 @@ struct llama_file_loader {
                 tensors_map.name_to_idx.emplace(name, idx);
             }
             tensors_map.tensors.at(idx).shards.push_back(shard);
+
+            if (shard.type == GGML_TYPE_Q4_X) {
+                printf("read tensor metadata: %s, %ld x %ld\n", name.c_str(), shard.ne[0], shard.ne[1]);
+                printf("extra_data: %d\n", shard.extra_data.size());
+
+            } else {
+                printf("read tensor metadata: %s\n", name.c_str());
+            }
         }
     }
 };
@@ -632,6 +652,8 @@ struct llama_file_saver {
         printf("new_size %d vs tensor size %d\n", new_size, tensor_size);
         LLAMA_ASSERT(new_size == tensor_size);
         file.write_raw(new_data, new_size);
+
+        file.seek(-static_cast<ptrdiff_t>(file.tell()) & 31, SEEK_CUR);
     }
 };
 
@@ -664,6 +686,7 @@ struct llama_model_loader {
         }
         this->use_mmap = use_mmap;
         for (llama_load_tensor & lt : tensors_map.tensors) {
+            printf("calc_all for %s\n", lt.name.c_str());
             lt.calc_all();
         }
     }
@@ -711,6 +734,8 @@ struct llama_model_loader {
     }
 
     struct ggml_tensor * get_tensor_for(llama_load_tensor & lt, ggml_backend backend) {
+        printf("getting tensor: %s\n", lt.name.c_str());
+
         struct ggml_tensor * tensor;
         if (lt.ne.size() == 2) {
             tensor = ggml_new_tensor_2d(ggml_ctx, lt.type, lt.ne.at(0), lt.ne.at(1));
@@ -719,13 +744,20 @@ struct llama_model_loader {
             tensor = ggml_new_tensor_1d(ggml_ctx, lt.type, lt.ne.at(0));
         }
         ggml_set_name(tensor, lt.name.c_str());
+
+        if (!lt.extra_data.empty()) {
+            tensor->extra_data = (uint32_t * ) ggml_aligned_malloc(sizeof(uint32_t) * lt.extra_data.size());
+            memcpy(tensor->extra_data, lt.extra_data.data(), sizeof(uint32_t) * lt.extra_data.size());
+            printf("tensor has extra_data: %zu\n", lt.extra_data.size());
+        }
+
         LLAMA_ASSERT(lt.ggml_tensor == NULL); // if this fails, we called get_tensor twice on the same tensor
         tensor->backend = backend;
         lt.ggml_tensor = tensor;
         num_ggml_tensors_created++;
         
-        printf("get_tensor: %s, %d x %d\n", tensor->name, tensor->ne[0], tensor->ne[1]);
-
+        printf("get_tensor: %s, %ld x %ld\n", tensor->name, tensor->ne[0], tensor->ne[1]);
+        
         return tensor;
     }
 
@@ -1105,6 +1137,8 @@ static void llama_model_load_internal(
 
             std::string layers_i = "layers." + std::to_string(i);
 
+            printf("loading layer %d\n", i);
+
             layer.attention_norm = ml->get_tensor(layers_i + ".attention_norm.weight", {n_embd}, backend);
 
             layer.wq = ml->get_tensor(layers_i + ".attention.wq.weight", {n_embd, n_embd}, backend);
@@ -1123,6 +1157,15 @@ static void llama_model_load_internal(
                     ggml_nbytes(layer.attention_norm) + ggml_nbytes(layer.wq) + ggml_nbytes(layer.wk)             +
                     ggml_nbytes(layer.wv)             + ggml_nbytes(layer.wo) + ggml_nbytes(layer.attention_norm) +
                     ggml_nbytes(layer.w1)             + ggml_nbytes(layer.w2) + ggml_nbytes(layer.w3);
+            }
+
+            if (layer.wk->type == GGML_TYPE_Q4_X) {
+                printf("%d.attention.wk.weight extra_data: size %ld\n", i, layer.wk->ne[1]);
+                for (int i = 0; i < 16; i++) {
+                    printf("%d ", layer.wk->extra_data[i]);
+                }
+                
+                printf("... %d\n", layer.wk->extra_data[layer.wk->ne[1] - 1]);
             }
         }
     }
@@ -1191,6 +1234,18 @@ static void llama_model_load_internal(
         }
     }
 #endif // GGML_USE_CUBLAS
+
+    if (model.layers[0].w2->type == GGML_TYPE_Q4_X) {
+        ggml_tensor * tensor = model.layers[0].w2;
+        
+        printf("data for %s:\n", tensor->name);
+
+        // uint8_t * data = (uint8_t*) tensor->data;
+        // printf("%x %x %x %x\n", data[0], data[1], data[2], data[3]);
+        for (int i = 0; i < 4; i++) {
+            print_tensor_qx((uint32_t * ) tensor->data, (uint32_t * ) tensor->extra_data, tensor->ne[0], i, 0);
+        }
+    }
 
     if (progress_callback) {
         progress_callback(1.0f, progress_callback_user_data);
@@ -1355,7 +1410,6 @@ static bool llama_eval_internal(
             // KQ = soft_max(KQ_masked)
             struct ggml_tensor * KQ_soft_max = ggml_soft_max_inplace(ctx0, KQ_masked);
             ggml_set_name(KQ_soft_max, "KQ_soft_max");
-
 
             // split cached V into n_head heads
             struct ggml_tensor * V =

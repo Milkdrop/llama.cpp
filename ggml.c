@@ -16,7 +16,6 @@
 #include <string.h>
 #include <stdint.h>
 #include <inttypes.h>
-#include <stdio.h>
 #include <float.h>
 #include <limits.h>
 
@@ -7579,7 +7578,7 @@ static void ggml_compute_forward_add_q_f32(
     const enum ggml_type type = src0->type;
 
     GGML_ASSERT(type != GGML_TYPE_Q4_X);
-    printf("lol? %d\n", type);
+    //printf("lol? %d\n", type);
 
     dequantize_row_q_t const dequantize_row_q = quantize_fns[type].dequantize_row_q;
     quantize_row_q_t const quantize_row_q = quantize_fns[type].quantize_row_q;
@@ -7901,7 +7900,7 @@ static void ggml_compute_forward_add1_q_f32(
     const enum ggml_type type = src0->type;
 
     GGML_ASSERT(type != GGML_TYPE_Q4_X);
-    printf("lol? %d\n", type);
+    // printf("lol? %d\n", type);
 
     dequantize_row_q_t const dequantize_row_q = quantize_fns[type].dequantize_row_q;
     quantize_row_q_t const quantize_row_q = quantize_fns[type].quantize_row_q;
@@ -10030,11 +10029,11 @@ static void ggml_compute_forward_mul_mat_q_f32(
     GGML_ASSERT(ne2  == ne12);
     GGML_ASSERT(ne3  == ne13);
     
-    printf("MUL (%ld x %ld x %ld x %ld), (%ld x %ld x %ld x %ld) = (%ld x %ld x %ld x %ld)\n",
-        ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, ne0, ne1, ne2, ne3);
+    // printf("MUL (%ld x %ld x %ld x %ld), (%ld x %ld x %ld x %ld) = (%ld x %ld x %ld x %ld)\n",
+    //     ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, ne0, ne1, ne2, ne3);
 
-    printf("MUL type: %d x %d = %d\n", src0->type, src1->type, dst->type);
-    printf("ith %d, nth %d\n", ith, nth);
+    // printf("MUL type: %d x %d = %d\n", src0->type, src1->type, dst->type);
+    // printf("ith %d, nth %d\n", ith, nth);
 
     const enum ggml_type type = src0->type;
 
@@ -10496,7 +10495,7 @@ static void ggml_compute_forward_get_rows_q(
     const enum ggml_type type = src0->type;
 
     GGML_ASSERT(type != GGML_TYPE_Q4_X);
-    printf("lol? %d\n", type);
+    // printf("lol? %d\n", type);
 
     dequantize_row_q_t const dequantize_row_q = quantize_fns[type].dequantize_row_q;
 
@@ -15586,27 +15585,6 @@ size_t ggml_quantize_q4_0(const float * src, void * dst, int n, int k, int64_t *
     return (n/QK4_0*sizeof(block_q4_0));
 }
 
-void set_bit(uint8_t * value, uint16_t bit, uint8_t set) {
-    if (set) {
-        *value |= 1 << bit;
-    } else {
-        *value &= ~(1 << bit);
-    }
-}
-
-void write_bits(uint8_t * dst, uint32_t bit_offset, uint16_t data, int bit_count) {
-    while (bit_count > 0) {
-        uint32_t byte = bit_offset / 8;
-        uint8_t byte_offset = bit_offset % 8;
-
-        set_bit(dst + byte, byte_offset, data & 1);
-
-        data >>= 1;
-        bit_offset += 1;
-        bit_count -= 1;
-    }
-}
-
 size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k, int64_t * hist, uint32_t * extra_data, uint32_t tensor_width) {
     GGML_ASSERT(n == k);
 
@@ -15684,16 +15662,28 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
             fp16_data[j] = fp16s[j];
         }
 
-        dst_offset += (QK4_X / 64) * 8;
+        dst_offset += (QK4_X / 64) * sizeof(uint64_t);
 
         uint64_t bit_offset = 0;
-        uint8_t * data = dst + dst_offset;
+        uint32_t * data = (uint32_t*) (dst + dst_offset);
 
         ///float qvals[4] = {-0.35, -0.15, 0.15, 0.35};
         float qvals[1 << QK4_QBits] = {-0.4, -0.3, -0.2, -0.15, -0.1, -0.05, -0.025, -0.01,
                                         0.4,  0.3,  0.2,  0.15,  0.1,  0.05,  0.025,  0.01};
 
         int fp16_count_chk = 0;
+
+        uint8_t print_bits = 0;
+        if ((i * QK4_X) % tensor_width == 0) {
+            uint32_t row = (i * QK4_X) / tensor_width;
+
+            if (row <= 5) {
+                printf("row %d data:\n", row);
+                printf("fp16: %lx\n", *fp16s);
+                print_bits = 1;
+            }
+        }
+        
         for (int j = 0; j < QK4_X; j++) {
             ggml_fp16_t x = src[i * QK4_X + j];
             float x_fp32 = GGML_FP16_TO_FP32(x);
@@ -15702,6 +15692,10 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
                 write_bits(data, bit_offset, x, 16);
                 bit_offset += 16;
                 fp16_count_chk += 1;
+                if (print_bits) {
+                    printf("%02x%02xh ", x >> 8, x & 0xFF);
+                }
+
             } else {
                 uint8_t q = 0;
                 float min_dist = fabsf(x_fp32 - qvals[0]);
@@ -15716,41 +15710,91 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
 
                 write_bits(data, bit_offset, q, QK4_QBits);
                 bit_offset += QK4_QBits;
+
+                if (print_bits) {
+                    printf("%d%d%d%d ", (q >> 3) & 1, (q >> 2) & 1, (q >> 1) & 1, q & 1);
+                }
             }
         }
 
-        GGML_ASSERT(fp16_count == fp16_count_chk);
+        if (print_bits) {
+            printf("\n");
 
+            uint32_t row = (i * QK4_X) / tensor_width;
+            printf("memory data, row %d:\n", row);
+
+            printf("data offset: %u\n", dst_offset);
+            printf("%x %x %x %x\n", data[0], data[1], data[2], data[3]);
+
+            // uint16_t w = 0;
+            // uint32_t offset = 0;
+
+            // for (int j = 0; j < QK4_X; j++) {
+            //     uint8_t sz = QK4_QBits;
+
+            //     if (fp16s[j / 64] & ((uint64_t) 1 << (j % 64))) {
+            //         sz = 16;
+            //     }
+
+            //     get_bits(data, offset, &w, sz);
+            //     offset += sz;
+
+            //     for (int k = sz - 1; k >= 0; k--) {
+            //         printf("%d", (w >> k) & 1);
+            //     }
+
+            //     if (sz == 16) {
+            //         printf("(%02x%02xh)", w >> 8, w & 0xFF);
+            //     }
+            //     printf(" ");
+            // }
+            // printf("\n");
+        }
+
+        GGML_ASSERT(fp16_count == fp16_count_chk);
+        GGML_ASSERT((((QK4_X - fp16_count) * QK4_QBits) % 8) == 0);
+        
         dst_offset += ((QK4_X - fp16_count) * QK4_QBits) / 8;
         dst_offset += fp16_count * 2;
 
         row_fp16s += fp16_count;
-
-        if (((i * QK4_X) % tensor_width == 0) && i != 0) {
-            uint32_t row = (i * QK4_X) / tensor_width;
+        
+        // the i+1 here is important, to not get fp16 information from the wrong row
+        if ((((i+1) * QK4_X) % tensor_width == 0) && i != 0) {
+            uint32_t row = ((i+1) * QK4_X) / tensor_width;
             extra_data[row - 1] = row_fp16s;
 
             if (row >= 2) {
                 extra_data[row - 1] += extra_data[row - 2]; // rolling sum
             }
 
+            if (row <= 5) {
+                printf("fp16s until row %d: %u\n", row, extra_data[row - 1]);
+                printf("fp16_count: %d\n", row_fp16s);
+            }
+
+            // if (row < 16) {
+            //     printf("%d ", extra_data[row - 1]);
+            //     if (row == 15) {
+            //         printf("...");
+            //     }
+            // }
+
             //printf("row %d, fp16s: %d, rolling sum: %d\n", row, row_fp16s, extra_data[row - 1]);
             row_fp16s = 0;
         }
 
+        // if (i <= 174) {
+        //     printf("d%d", dst_offset);
+        //     if (fp16_count > 0) {
+        //         printf("(%d)", fp16_count);
+        //     }
+
+        //     printf(" ");
+        // }
+
         //printf("quantized block %d, %d FP16s, %d 4bit vals, fin_offset: %d\n", i, fp16_count, QK4_X - fp16_count, dst_offset);
     }
-    
-    // last row
-    uint32_t row = n / tensor_width;
-    extra_data[row - 1] = row_fp16s;
-
-    if (row >= 2) {
-        extra_data[row - 1] += extra_data[row - 2]; // rolling sum
-    }
-
-    printf("row %d, fp16s: %d, rolling sum: %d\n", row, row_fp16s, extra_data[row - 1]);
-    row_fp16s = 0;
 
     return dst_offset;
 }

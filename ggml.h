@@ -183,6 +183,7 @@
 #    define GGML_API
 #endif
 
+#include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -245,6 +246,141 @@ inline static void* ggml_aligned_malloc(size_t size) {
 #else
     typedef uint16_t ggml_fp16_t;
 #endif
+
+// inline static void set_bit(uint8_t * value, uint16_t bit, uint8_t set) {
+//     if (set) {
+//         *value |= 1 << bit;
+//     } else {
+//         *value &= ~(1 << bit);
+//     }
+// }
+
+// void get_bits(uint8_t * dst, uint32_t bit_offset, uint16_t data, int bit_count) {
+//     while (bit_count > 0) {
+//         uint32_t byte = bit_offset / 8;
+//         uint8_t byte_offset = bit_offset % 8;
+
+//         set_bit(dst + byte, byte_offset, data & 1);
+
+//         data >>= 1;
+//         bit_offset += 1;
+//         bit_count -= 1;
+//     }
+// }
+
+inline static void get_bits(uint32_t * src, uint32_t bit_offset, uint16_t * data, uint16_t bit_count) {
+    const uint32_t chunk_size = (sizeof(uint32_t) * 8);
+
+    const uint32_t chunk_id = bit_offset / chunk_size;
+    src = src + chunk_id;
+    bit_offset %= (sizeof(uint32_t) * 8);
+
+    if (bit_offset + bit_count > chunk_size) {
+        // first fill the current chunk
+        uint16_t bitcount_1 = chunk_size - bit_offset;
+
+        *data = (*src >> bit_offset) & ((1 << bitcount_1) - 1);
+
+        // move onto the next chunk
+        bit_count -= bitcount_1;
+        bit_offset = 0;
+        src += 1;
+
+        *data |= (*src & ((1 << bit_count) - 1)) << bitcount_1;
+    } else {
+        *data = (*src >> bit_offset) & ((1 << bit_count) - 1);
+    }
+}
+
+inline static void write_bits(uint32_t * dst, uint32_t bit_offset, uint16_t data, uint16_t bit_count) {
+    const uint32_t chunk_size = (sizeof(uint32_t) * 8);
+
+    const uint32_t chunk_id = bit_offset / chunk_size;
+    dst = dst + chunk_id;
+    bit_offset %= (sizeof(uint32_t) * 8);
+
+    if (bit_offset + bit_count > chunk_size) {
+        // first fill the current chunk
+        uint16_t bitcount_1 = chunk_size - bit_offset;
+
+        uint32_t bitmask = ((1 << bitcount_1) - 1) << (bit_offset);
+        *dst &= ~bitmask;
+        *dst |= data << bit_offset;
+
+        // move onto the next chunk
+        data >>= bitcount_1;
+
+        bit_count -= bitcount_1;
+        bit_offset = 0;
+        dst += 1;
+
+        bitmask = ((1 << bit_count) - 1) << (bit_offset);
+        *dst &= ~bitmask;
+        *dst |= data << bit_offset;
+    } else {
+        uint32_t bitmask = ((1 << bit_count) - 1) << (bit_offset);
+        *dst &= ~bitmask;
+        *dst |= data << bit_offset;
+    }
+}
+
+inline static size_t llama_calc_mixed_q_tensor_size(uint32_t total_elems, uint32_t total_fp16s) {
+    size_t tensor_size = 0;
+    uint32_t total_qs = total_elems - total_fp16s;
+    GGML_ASSERT((total_qs * QK4_QBits) % 8 == 0);
+
+    tensor_size = total_fp16s * 2 + (total_qs * QK4_QBits) / 8; // weights
+    tensor_size += total_elems / 8; // 1 bit for every weight to signal if it's 16bit or Q'd
+
+    return tensor_size;
+}
+
+inline static void print_tensor_qx(uint32_t * data, uint32_t * extra_data, uint64_t tensor_width, uint32_t row, uint32_t block) {
+    GGML_ASSERT(block == 0);
+
+    uint32_t fp16s_until_row = 0;
+    if (row >= 1) {
+        fp16s_until_row = extra_data[row - 1];
+    }
+
+    uint64_t total_elems = tensor_width * row;
+    uint64_t byte_offset = llama_calc_mixed_q_tensor_size(total_elems, fp16s_until_row);
+
+    uint64_t * block_start = (uint64_t *) ((uint8_t *) data + byte_offset);
+    uint32_t * data_start = (uint32_t *) (block_start + (QK4_X / 64));
+    
+    printf("pointers:\n%p %p %p\n", (uint8_t *) data + byte_offset, block_start, data_start);
+    printf("total_elems: %lu, fp16 until row: %u, byte_offset: %lu\n", total_elems, fp16s_until_row, byte_offset);
+    
+    uint16_t w = 0;
+    uint32_t offset = 0;
+
+    printf("row %d data:\n", row);
+    printf("fp16: %lx\n", *block_start);
+
+    for (int j = 0; j < QK4_X; j++) {
+        uint8_t sz = QK4_QBits;
+
+        if (block_start[j / 64] & ((uint64_t) 1 << (j % 64))) {
+            sz = 16;
+        }
+
+        get_bits(data_start, offset, &w, sz);
+        offset += sz;
+
+        for (int k = sz - 1; k >= 0; k--) {
+            printf("%d", (w >> k) & 1);
+        }
+
+        if (sz == 16) {
+            printf("(%02x%02xh)", w >> 8, w & 0xFF);
+        }
+        printf(" ");
+    }
+
+    printf("\nmemory data, row %d:\n", row);
+    printf("%x %x %x %x\n", data_start[0], data_start[1], data_start[2], data_start[3]);
+}
 
     // convert FP16 <-> FP32
     GGML_API float       ggml_fp16_to_fp32(ggml_fp16_t x);
@@ -399,7 +535,7 @@ inline static void* ggml_aligned_malloc(size_t size) {
         int64_t perf_time_us;
 
         void * data;
-        void * extra_data;
+        uint32_t * extra_data;
         
         char name[32];
 
