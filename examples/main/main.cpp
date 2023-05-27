@@ -107,7 +107,7 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "%s: error: unable to load model\n", __func__);
         return 1;
     }
-
+    
     // print system information
     {
         fprintf(stderr, "\n");

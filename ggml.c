@@ -2173,103 +2173,83 @@ inline static void ggml_vec_dot_f16(const int n, float * restrict s, ggml_fp16_t
     *s = sumf;
 }
 
-
-static void ggml_vec_dot_q4_x_q8_0(uint8_t * row_data, const uint16_t row_width, float * restrict result, const uint8_t * restrict column_ptr) {
-    const block_q8_0 * restrict column = column_ptr;
-
-    // todo
+static void dequantize_row_q4_x(uint8_t * row_data, const uint16_t row_width, uint16_t* row_save) {
     uint32_t nb = row_width / QK4_X;
     float qvals[1 << QK4_QBits] = {-0.04, -0.03, -0.02, -0.01, -0.005, -0.001, -0.00025, -0.0001,
                                     0.04,  0.03,  0.02,  0.01,  0.005,  0.001,  0.00025,  0.0001};
 
-    double sumf = 0.0;
     GGML_ASSERT(QK4_X % QK8_0 == 0);
     
-    if (false) {
-        #if !defined(__AVX2__)
-            fprintf(stderr, "Missing AVX2! Please disable it in ggml_vec_dot_q4_x_q8_0");
-            fflush(stderr);
-            GGML_ASSERT(false);
-        #endif
+    float qvals_f16[1 << QK4_QBits] = {43295, 42926, 42271, 41247, 40223, 37913, 35865, 34446,
+                                        10527, 10158, 9503, 8479, 7455, 5145, 3097, 1678};
+    for (int b = 0; b < nb; b++) {
+        uint64_t * block_start = (uint64_t *) row_data;
+        uint32_t * data_start = (uint32_t *) (block_start + (QK4_X / 64));
+        row_data = (uint8_t * ) data_start;
 
-        // Initialize accumulator with zeros
+        uint32_t offset = 0;
+        
+        for (int j = 0; j < QK4_X; j++) {
+            // for some reason, an "if" statement here slows down the code a lot,
+            // probably because of constant branch misprediction; so we are storing
+            // if the weight is in 16bit in a variable
+            const uint8_t is_fp16 = (block_start[j / 64] >> (j % 64)) & 1;
+            const uint8_t sz = QK4_QBits << (is_fp16 << 1);
 
-        // __m256 acc = _mm256_setzero_ps();
+            uint16_t w = 0;
+            get_bits(data_start, offset, &w, sz);
+            offset += sz;
 
-        // // Main loop
-        // for (int i = 0; i < nb; ++i) {
-        //     /* Compute combined scale for the block */
-        //     const __m256 d = _mm256_set1_ps( GGML_FP16_TO_FP32(x[i].d) * GGML_FP16_TO_FP32(y[i].d) );
-
-        //     __m256i bx = bytes_from_nibbles_32(x[i].qs);
-
-        //     // Now we have a vector with bytes in [ 0 .. 15 ] interval. Offset them into [ -8 .. +7 ] interval.
-        //     const __m256i off = _mm256_set1_epi8( 8 );
-        //     bx = _mm256_sub_epi8( bx, off );
-
-        //     __m256i by = _mm256_loadu_si256((const __m256i *)y[i].qs);
-
-        //     const __m256 q = mul_sum_i8_pairs_float(bx, by);
-
-        //     /* Multiply q with scale and accumulate */
-        //     acc = _mm256_fmadd_ps( d, q, acc );
-        // }
-
-        // *s = hsum_float_8(acc);
-    } else {
-        for (int b = 0; b < nb; b++) {
-            uint64_t * block_start = (uint64_t *) row_data;
-            uint32_t * data_start = (uint32_t *) (block_start + (QK4_X / 64));
-            row_data = (uint8_t * ) data_start;
-
-            uint32_t offset = 0;
-            
-            for (int jb = 0; jb < QK4_X / QK8_0; jb++) {
-                double sum_b = 0.0;
-                const uint32_t block_id = b * (QK4_X / QK8_0) + jb;
-
-                for (int i = 0; i < QK8_0; i++) {
-                    const uint16_t j = jb * QK8_0 + i;
-
-                    // for some reason, an "if" statement here slows down the code a lot,
-                    // probably because of constant branch misprediction; so we are storing
-                    // if the weight is in 16bit in a variable
-                    const uint8_t is_fp16 = (block_start[j / 64] >> (j % 64)) & 1;
-                    const uint8_t sz = QK4_QBits << (is_fp16 << 1);
-
-                    uint16_t w = 0;
-                    get_bits(data_start, offset, &w, sz);
-                    offset += sz;
-
-                    int8_t y_elem = column[block_id].qs[i];
-
-                    if (sz == 16) {
-                        sum_b += GGML_FP16_TO_FP32(w) * y_elem;
-                    } else {
-                        sum_b += qvals[w] * y_elem;
-                    }
-                    
-                    // if (sz == 16) {
-                    //     printf("%02x%02xh (%f)", w >> 8, w & 0xFF, GGML_FP16_TO_FP32(w));
-                    // } else {
-                    //     for (int k = sz - 1; k >= 0; k--) {
-                    //         printf("%d (%f)", (w >> k) & 1, qvals[w]);
-                    //     }
-                    // }
-
-                    // printf(" x %f = %lf\n", y_elem, sum_b);
-                }
-
-                sumf += sum_b * GGML_FP16_TO_FP32(column[block_id].d);
-                sum_b = 0;
+            if (sz == 16) {
+                row_save[b * QK4_X + j] = w;
+            } else {
+                row_save[b * QK4_X + j] = qvals_f16[w];
             }
+            
+            // if (sz == 16) {
+            //     printf("%02x%02xh (%f)", w >> 8, w & 0xFF, GGML_FP16_TO_FP32(w));
+            // } else {
+            //     for (int k = sz - 1; k >= 0; k--) {
+            //         printf("%d (%f)", (w >> k) & 1, qvals[w]);
+            //     }
+            // }
 
-            GGML_ASSERT(offset % 8 == 0);
-            row_data += offset / 8;
+            // printf(" x %f = %lf\n", y_elem, sum_b);
         }
 
-        *result = sumf;
+        GGML_ASSERT(offset % 8 == 0);
+        row_data += offset / 8;
     }
+}
+
+static void ggml_vec_dot_f16_q8_0(uint16_t* src_row, const uint16_t row_width, float * restrict result, const void * restrict column_ptr) {
+    const int qk = QK8_0;
+    const int nb = row_width / qk;
+
+    assert(row_width % qk == 0);
+    assert(nb % 2 == 0);
+
+    const block_q8_0 * restrict column = column_ptr;
+
+    // forced slow implemenation, for benchmarking
+    // scalar
+    float sumf = 0.0;
+    
+    for (int i = 0; i < nb; i++) {
+        float block_sum = 0;
+
+        for (int j = 0; j < qk; ++j) {
+            block_sum += GGML_FP16_TO_FP32(src_row[i * qk + j]) * column[i].qs[j];
+        }
+
+        sumf += block_sum*GGML_FP16_TO_FP32(column[i].d);
+    }
+
+    *result = sumf;
+}
+
+static void ggml_vec_dot_q4_x_q8_0(uint8_t * row_data, const uint16_t row_width, float * restrict result, const uint8_t * restrict column_ptr) {
+    
 }
 
 static void ggml_vec_dot_q4_0_q8_0(const int n, float * restrict s, const void * restrict vx, const void * restrict vy) {
@@ -10244,9 +10224,12 @@ static void ggml_compute_forward_mul_mat_q_f32(
 
             //printf("row %d:\n", ir);
             
-            for (int64_t ic = 0; ic < ne11; ++ic) {
-                ggml_vec_dot_q4_x_q8_0((uint8_t *) src_data + byte_offset, ne00, &dst_col[ic*ne0], (src1_col + ic*row_size));
-            }
+            uint16_t src_row[ne00];
+            dequantize_row_q4_x((uint8_t *) src_data + byte_offset, ne00, src_row);
+
+            // for (int64_t ic = 0; ic < ne11; ++ic) {
+            //     ggml_vec_dot_f16_q8_0(src_row, ne00, &dst_col[ic*ne0], src1_col + ic*row_size);
+            // }
         }
     } else {
         vec_dot_q_t      const vec_dot_q          = quantize_fns[type].vec_dot_q;

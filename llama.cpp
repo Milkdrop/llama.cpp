@@ -804,6 +804,14 @@ struct llama_model_loader {
                 lmlock->grow_to(done_size);
             }
         }
+
+        float qvals[1 << QK4_QBits] = {-0.04, -0.03, -0.02, -0.01, -0.005, -0.001, -0.00025, -0.0001,
+                                    0.04,  0.03,  0.02,  0.01,  0.005,  0.001,  0.00025,  0.0001};
+
+        printf("qvals:");
+        for (int i = 0; i < (1 << QK4_QBits); i++) {
+            printf("%d, ", ggml_fp32_to_fp16(qvals[i]));
+        }
     }
 
     void load_data_for(llama_load_tensor & lt) {
