@@ -10211,12 +10211,11 @@ static void ggml_compute_forward_mul_mat_q_f32(
 
     void * wdata = params->wdata;
     void * src_data = src0->data;
-    uint32_t * extra_data = src0->extra_data;
+    uint64_t * extra_data = src0->extra_data;
     const size_t row_size = ne00*GGML_TYPE_SIZE[vec_dot_type]/GGML_BLCK_SIZE[vec_dot_type];
 
     if (src0->type == GGML_TYPE_Q4_X) {
         GGML_ASSERT(ne02 == 1 && ne03 == 1);
-        int fp16s_until_row = 0;
         //printf("ne00: %d\n", ne00);
 
         // printf("MUL (%ld x %ld x %ld x %ld), (%ld x %ld x %ld x %ld) = (%ld x %ld x %ld x %ld)\n",
@@ -10236,12 +10235,9 @@ static void ggml_compute_forward_mul_mat_q_f32(
             const int i2 = i02;
             const int i3 = i03;
 
-            if (ir != 0) {
-                fp16s_until_row = extra_data[ir - 1];
+            if (ir > 0) {
+                byte_offset = extra_data[ir - 1];
             }
-
-            const int total_elems = ne00 * ir;
-            byte_offset = llama_calc_mixed_q_tensor_size(total_elems, fp16s_until_row);
 
             uint8_t * src1_col =          ((uint8_t *)      wdata + (      (0 + i12*ne11 + i13*ne12*ne11)*row_size));
             float * dst_col = (float *) ((char *) dst->data + (i0*nb0 + 0*nb1 + i2*nb2 + i3*nb3));
@@ -15667,19 +15663,19 @@ size_t ggml_quantize_q4_0(const float * src, void * dst, int n, int k, int64_t *
     return (n/QK4_0*sizeof(block_q4_0));
 }
 
-size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k, int64_t * hist, uint32_t * extra_data, uint32_t tensor_width, FILE* debug_fp) {
+size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k, int64_t * hist, uint64_t * extra_data, uint32_t tensor_width, FILE* debug_fp) {
     GGML_ASSERT(n == k);
 
     uint8_t * dst = (uint8_t*) dst_void;
     assert(k % QK4_X == 0);
     const int nb = n / QK4_X;
     
-    printf("\nggml_quantize_q4_x: n %d, nb %d \n", n, nb);
+    // printf("\nggml_quantize_q4_x: n %d, nb %d \n", n, nb);
 
     // block_q4_x:
     // uint64_t is_fp16[QK4_X / 64];
     // uint8_t values[1];
-    uint32_t dst_offset = 0;
+    uint64_t dst_offset = 0;
     
     uint32_t row_fp16s = 0;
 
@@ -15693,7 +15689,7 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
         }
 
         int fp16_count = 0;
-        float thresh = 0.05;
+        float thresh = 0.1;
 
         for (int j = 0; j < QK4_X; j++) {
             ggml_fp16_t x = src[i * QK4_X + j];
@@ -15717,26 +15713,54 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
         // i.e. block1 having 4 extra bits at the end and block2 having 4 other extra bits, this would lead to a ghost extra byte in the data stream
 
         while (((QK4_X - fp16_count) * QK4_QBits) % 8 != 0) {
-            float mini = 0;
+            // this code removes a 16bit weight
+            // float mini = 0;
+            // int target = -1;
+
+            // for (int j = 0; j < QK4_X; j++) {
+            //     ggml_fp16_t x = src[i * QK4_X + j];
+            //     float x_fp32 = GGML_FP16_TO_FP32(x);
+                
+            //     // weight is on 16bit
+            //     if (fp16s[j / 64] & ((uint64_t) 1 << (j % 64))) {
+            //         float diff = fabsf(x_fp32) - thresh;
+            //         if (diff < mini || target == -1) {
+            //             mini = diff;
+            //             target = j;
+            //         }
+            //     }
+            // }
+
+            // //printf("wrong %d qs, reverting: %d (%f)\n", (QK4_X - fp16_count), target, GGML_FP16_TO_FP32(src[i * QK4_X + target]));
+            // fp16s[target / 64] &= ~((uint64_t) 1 << (target % 64));
+            // fp16_count -= 1;
+            
+            // this code adds a 16bit weight
+            float maxi = 0;
             int target = -1;
 
             for (int j = 0; j < QK4_X; j++) {
                 ggml_fp16_t x = src[i * QK4_X + j];
                 float x_fp32 = GGML_FP16_TO_FP32(x);
                 
-                // weight is on 16bit
-                if (fp16s[j / 64] & ((uint64_t) 1 << (j % 64))) {
-                    float diff = fabsf(x_fp32) - thresh;
-                    if (diff < mini || target == -1) {
-                        mini = diff;
+                // weight is not on 16bit
+                if (!(fp16s[j / 64] & ((uint64_t) 1 << (j % 64)))) {
+                    float diff = fabsf(x_fp32);
+                    if (diff > maxi || target == -1) {
+                        maxi = diff;
                         target = j;
                     }
                 }
             }
 
-            //printf("wrong %d qs, reverting: %d (%f)\n", (QK4_X - fp16_count), target, GGML_FP16_TO_FP32(src[i * QK4_X + target]));
-            fp16s[target / 64] &= ~((uint64_t) 1 << (target % 64));
-            fp16_count -= 1;
+            GGML_ASSERT(target != -1);
+            fp16s[target / 64] |= (uint64_t) 1 << (target % 64);
+            fp16_count += 1;
+        }
+
+        if (((i * QK4_X) % tensor_width == 0) && i != 0) {
+            uint32_t row = (i * QK4_X) / tensor_width;
+            extra_data[row - 1] = dst_offset;
         }
 
         //printf("f16: %lx\nf16_count: %d\n", fp16s[0], fp16_count);
@@ -15805,16 +15829,15 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
                     printf("%d%d%d%d ", (q >> 3) & 1, (q >> 2) & 1, (q >> 1) & 1, q & 1);
                 }
 
-                if (debug_fp != NULL || true) {
-                    float diff = fabsf(x_fp32 - qvals[q]);
-
-                    if (diff >= 0.02) {
-                        print_vals = 1;
-                        printf("%f -> %d -> %f, diff = %f\n", x_fp32, q, qvals[q], diff);
-                    }
-                    
-                    // fprintf(debug_fp, "%f ", diff); // this should be equal to min_dist actually
+                float diff = fabsf(x_fp32 - qvals[q]);
+                if (debug_fp != NULL) {
+                    fprintf(debug_fp, "%f ", diff); // this should be equal to min_dist actually
                 }
+
+                // if (diff >= 0.005) {
+                //     print_vals = 1;
+                //     printf("%f -> %d -> %f, diff = %f\n", x_fp32, q, qvals[q], diff);
+                // }
             }
         }
         
@@ -15845,7 +15868,7 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
                         printf("%-2.6f ", debug_vals[j]);
                     }
                 }
-                
+                printf("\n\n");
                 // int start_id = 0;
                 // for (int j = 0; j < QK4_X; j++) {
                 //     if (fabsf(debug_vals[j]) <= thresh) {
@@ -15923,43 +15946,17 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
         
         // the i+1 here is important, to not get fp16 information from the wrong row
         if ((((i+1) * QK4_X) % tensor_width == 0) && i != 0) {
-            uint32_t row = ((i+1) * QK4_X) / tensor_width;
-            extra_data[row - 1] = row_fp16s;
-
-            if (row >= 2) {
-                extra_data[row - 1] += extra_data[row - 2]; // rolling sum
-            }
-
-            if (print_bits) {
-                // if (row <= 5) {
-                //     printf("fp16s until row %d: %u\n", row, extra_data[row - 1]);
-                //     printf("fp16_count: %d\n", row_fp16s);
-                // }
-
-                // if (row < 16) {
-                //     printf("%d ", extra_data[row - 1]);
-                //     if (row == 15) {
-                //         printf("...");
-                //     }
-                // }
-            }
-
-            //printf("row %d, fp16s: %d, rolling sum: %d\n", row, row_fp16s, extra_data[row - 1]);
             row_fp16s = 0;
         }
 
-        // if (i <= 174) {
-        //     printf("d%d", dst_offset);
-        //     if (fp16_count > 0) {
-        //         printf("(%d)", fp16_count);
-        //     }
-
-        //     printf(" ");
+        // if (fp16_count > 12) {
+        //     printf("quantized block %d, %d FP16s, %d 4bit vals, fin_offset: %d\n", i, fp16_count, QK4_X - fp16_count, dst_offset);
         // }
-
-        //printf("quantized block %d, %d FP16s, %d 4bit vals, fin_offset: %d\n", i, fp16_count, QK4_X - fp16_count, dst_offset);
     }
+    
+    extra_data[n / tensor_width - 1] = dst_offset;
 
+    printf("total bytes: %ld\n", extra_data[n / tensor_width - 1]);
     return dst_offset;
 }
 
@@ -16067,7 +16064,7 @@ size_t ggml_quantize_q8_0(const float * src, void * dst, int n, int k, int64_t *
     return (n/QK8_0*sizeof(block_q8_0));
 }
 
-size_t ggml_quantize_chunk(enum ggml_type type, const ggml_fp16_t * src_raw, const float * src, void * dst, int start, int n, int64_t * hist, uint32_t * extra_data, uint32_t tensor_width, FILE* debug_fp) {
+size_t ggml_quantize_chunk(enum ggml_type type, const ggml_fp16_t * src_raw, const float * src, void * dst, int start, int n, int64_t * hist, uint64_t * extra_data, uint32_t tensor_width, FILE* debug_fp) {
     size_t result = 0;
     switch (type) {
         case GGML_TYPE_Q4_0:

@@ -214,7 +214,8 @@
 extern "C" {
 #endif
 
-#define QK4_X 64
+// max is 256, because some feed_forward weights have a width of 11008
+#define QK4_X 256
 #define QK4_QBits 4
 
 #if UINTPTR_MAX == 0xFFFFFFFF
@@ -324,63 +325,65 @@ inline static void write_bits(uint32_t * dst, uint32_t bit_offset, uint16_t data
     }
 }
 
-inline static size_t llama_calc_mixed_q_tensor_size(uint32_t total_elems, uint32_t total_fp16s) {
-    size_t tensor_size = 0;
-    uint32_t total_qs = total_elems - total_fp16s;
-    GGML_ASSERT((total_qs * QK4_QBits) % 8 == 0);
+// inline static size_t llama_calc_mixed_q_tensor_size(uint32_t total_elems, uint32_t total_fp16s) {
+//     size_t tensor_size = 0;
+//     uint32_t total_qs = total_elems - total_fp16s;
+//     GGML_ASSERT((total_qs * QK4_QBits) % 8 == 0);
 
-    tensor_size = total_fp16s * 2 + (total_qs * QK4_QBits) / 8; // weights
-    tensor_size += total_elems / 8; // 1 bit for every weight to signal if it's 16bit or Q'd
+//     tensor_size = total_fp16s * 2 + (total_qs * QK4_QBits) / 8; // weights
+//     tensor_size += total_elems / 8; // 1 bit for every weight to signal if it's 16bit or Q'd
 
-    return tensor_size;
-}
+//     return tensor_size;
+// }
 
-inline static void print_tensor_qx(uint32_t * data, uint32_t * extra_data, uint64_t tensor_width, uint32_t row, uint32_t block) {
-    GGML_ASSERT(block == 0);
+// inline static void print_tensor_qx(uint32_t * data, uint64_t * extra_data, uint64_t tensor_width, uint32_t row, uint32_t block) {
+//     GGML_ASSERT(block == 0);
+//     fprintf(stderr, "print_tensor_qx is outdated!");
+//     GGML_ASSERT(false);
 
-    uint32_t fp16s_until_row = 0;
-    if (row >= 1) {
-        fp16s_until_row = extra_data[row - 1];
-    }
+//     uint32_t fp16s_until_row = 0;
+//     if (row >= 1) {
+//         fp16s_until_row = extra_data[row - 1];
+//     }
 
-    uint64_t total_elems = tensor_width * row;
-    uint64_t byte_offset = llama_calc_mixed_q_tensor_size(total_elems, fp16s_until_row);
+//     uint64_t total_elems = tensor_width * row;
+//     uint64_t byte_offset = llama_calc_mixed_q_tensor_size(total_elems, fp16s_until_row);
 
-    uint64_t * block_start = (uint64_t *) ((uint8_t *) data + byte_offset);
-    uint32_t * data_start = (uint32_t *) (block_start + (QK4_X / 64));
+//     uint64_t * block_start = (uint64_t *) ((uint8_t *) data + byte_offset);
+//     uint32_t * data_start = (uint32_t *) (block_start + (QK4_X / 64));
     
-    printf("pointers:\n%p %p %p\n", (uint8_t *) data + byte_offset, block_start, data_start);
-    printf("total_elems: %lu, fp16 until row: %u, byte_offset: %lu\n", total_elems, fp16s_until_row, byte_offset);
+//     printf("pointers:\n%p %p %p\n", (uint8_t *) data + byte_offset, block_start, data_start);
+//     printf("total_elems: %lu, fp16 until row: %u, byte_offset: %lu\n", total_elems, fp16s_until_row, byte_offset);
     
-    uint16_t w = 0;
-    uint32_t offset = 0;
+//     uint16_t w = 0;
+//     uint32_t offset = 0;
 
-    printf("row %d data:\n", row);
-    printf("fp16: %lx\n", *block_start);
+//     printf("row %d data:\n", row);
+//     printf("fp16: %lx\n", *block_start);
 
-    for (int j = 0; j < QK4_X; j++) {
-        uint8_t sz = QK4_QBits;
+//     for (int j = 0; j < QK4_X; j++) {
+//         uint8_t sz = QK4_QBits;
 
-        if (block_start[j / 64] & ((uint64_t) 1 << (j % 64))) {
-            sz = 16;
-        }
+//         if (block_start[j / 64] & ((uint64_t) 1 << (j % 64))) {
+//             sz = 16;
+//         }
 
-        get_bits(data_start, offset, &w, sz);
-        offset += sz;
+//         get_bits(data_start, offset, &w, sz);
+//         offset += sz;
 
-        for (int k = sz - 1; k >= 0; k--) {
-            printf("%d", (w >> k) & 1);
-        }
+//         for (int k = sz - 1; k >= 0; k--) {
+//             printf("%d", (w >> k) & 1);
+//         }
 
-        if (sz == 16) {
-            printf("(%02x%02xh)", w >> 8, w & 0xFF);
-        }
-        printf(" ");
-    }
+//         if (sz == 16) {
+//             printf("(%02x%02xh)", w >> 8, w & 0xFF);
+//         }
+//         printf(" ");
+//     }
 
-    printf("\nmemory data, row %d:\n", row);
-    printf("%x %x %x %x\n", data_start[0], data_start[1], data_start[2], data_start[3]);
-}
+//     printf("\nmemory data, row %d:\n", row);
+//     printf("%x %x %x %x\n", data_start[0], data_start[1], data_start[2], data_start[3]);
+// }
 
     // convert FP16 <-> FP32
     GGML_API float       ggml_fp16_to_fp32(ggml_fp16_t x);
@@ -535,7 +538,7 @@ inline static void print_tensor_qx(uint32_t * data, uint32_t * extra_data, uint6
         int64_t perf_time_us;
 
         void * data;
-        uint32_t * extra_data;
+        uint64_t * extra_data;
         
         char name[32];
 
@@ -1245,13 +1248,13 @@ inline static void print_tensor_qx(uint32_t * data, uint32_t * extra_data, uint6
     //
 
     GGML_API size_t ggml_quantize_q4_0(const float * src, void * dst, int n, int k, int64_t * hist, FILE* debug_fp);
-    GGML_API size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst, int n, int k, int64_t * hist, uint32_t * extra_data, uint32_t tensor_width, FILE* debug_fp);
+    GGML_API size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst, int n, int k, int64_t * hist, uint64_t * extra_data, uint32_t tensor_width, FILE* debug_fp);
     GGML_API size_t ggml_quantize_q4_1(const float * src, void * dst, int n, int k, int64_t * hist);
     GGML_API size_t ggml_quantize_q5_0(const float * src, void * dst, int n, int k, int64_t * hist);
     GGML_API size_t ggml_quantize_q5_1(const float * src, void * dst, int n, int k, int64_t * hist);
     GGML_API size_t ggml_quantize_q8_0(const float * src, void * dst, int n, int k, int64_t * hist);
 
-    GGML_API size_t ggml_quantize_chunk(enum ggml_type type, const ggml_fp16_t * src_raw, const float * src, void * dst, int start, int n, int64_t * hist, uint32_t * extra_data, uint32_t tensor_width, FILE* debug_fp);
+    GGML_API size_t ggml_quantize_chunk(enum ggml_type type, const ggml_fp16_t * src_raw, const float * src, void * dst, int start, int n, int64_t * hist, uint64_t * extra_data, uint32_t tensor_width, FILE* debug_fp);
 
     //
     // system info
