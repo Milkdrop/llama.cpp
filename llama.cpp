@@ -630,9 +630,9 @@ struct llama_file_saver {
         size_t tensor_size;
 
         if (new_type == GGML_TYPE_Q4_X) {
-            printf("writing %s\n", tensor.name.c_str());
-            printf("tensor.ggml_tensor: %p\n", tensor.ggml_tensor);
-            printf("extra_data: %p\n", extra_data);
+            // printf("writing %s\n", tensor.name.c_str());
+            // printf("tensor.ggml_tensor: %p\n", tensor.ggml_tensor);
+            // printf("extra_data: %p\n", extra_data);
 
             file.write_raw(extra_data, sizeof(uint32_t) * tensor.ne[1]);
             
@@ -649,7 +649,7 @@ struct llama_file_saver {
         }
 
         file.seek(-static_cast<ptrdiff_t>(file.tell()) & 31, SEEK_CUR);
-        printf("new_size %d vs tensor size %d\n", new_size, tensor_size);
+        // printf("new_size %zu vs tensor size %zu\n", new_size, tensor_size);
         LLAMA_ASSERT(new_size == tensor_size);
         file.write_raw(new_data, new_size);
 
@@ -2227,6 +2227,8 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
         llama_buffer work;
         uint32_t * extra_data = NULL;
 
+        FILE* debug_fp = NULL;
+
         if (!quantize) {
             new_type = tensor.type;
             new_data = tensor.data;
@@ -2247,49 +2249,35 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
                 f32_data = (float *) f32_conv_buf.addr;
                 f16_data = (ggml_fp16_t *) tensor.data;
 
+                for (size_t i = 0; i < nelements; i++) {
+                    f32_data[i] = ggml_fp16_to_fp32(f16_data[i]);
+                }
+
                 if (false
-                    // tensor.name.find(std::string(".1.attention.wq")) != std::string::npos
-                    // tensor.name.find(std::string(".15.attention.wq")) != std::string::npos
-                    // || tensor.name.find(std::string(".15.attention.wv")) != std::string::npos
-                    // || tensor.name.find(std::string(".15.attention.wo")) != std::string::npos
+                    // || tensor.name.find(std::string(".0.attention.w")) != std::string::npos
+                    // || tensor.name.find(std::string(".1.attention.w")) != std::string::npos
+                    // || tensor.name.find(std::string(".15.attention.w")) != std::string::npos
+                    // || tensor.name.find(std::string(".31.attention.w")) != std::string::npos
                     // || tensor.name.find(std::string(".0.feed_forward")) != std::string::npos
                     // || tensor.name.find(std::string(".15.feed_forward")) != std::string::npos
-                    // || tensor.name.find(std::string(".31.feed_forward")) != std::string::npos
-                    // || tensor.name.find(std::string(".2.feed_forward")) != std::string::npos
-                    // || tensor.name.find(std::string(".3.feed_forward")) != std::string::npos
-                    // || tensor.name.find(std::string(".8.feed_forward")) != std::string::npos
-                    // || tensor.name.find(std::string(".13.feed_forward")) != std::string::npos
-                    // || tensor.name.find(std::string(".15.feed_forward")) != std::string::npos
-                    //tensor.name.find(std::string(".27.feed_forward")) != std::string::npos
-                    // || tensor.name.find(std::string(".31.feed_forward")) != std::string::npos
-                    // || tensor.name.find(std::string("13")) != std::string::npos
-                    // || tensor.name.find(std::string("14")) != std::string::npos
-                    // || tensor.name.find(std::string("15")) != std::string::npos
-                    // || tensor.name.find(std::string("20")) != std::string::npos
-                    // || tensor.name.find(std::string("21")) != std::string::npos
-                    // || tensor.name.find(std::string("22")) != std::string::npos
-                    // || tensor.name.find(std::string("23")) != std::string::npos
-                    // || tensor.name.find(std::string("28")) != std::string::npos
-                    // || tensor.name.find(std::string("29")) != std::string::npos
-                    // || tensor.name.find(std::string("30")) != std::string::npos
-                    // || tensor.name.find(std::string("31")) != std::string::npos
+                    // || tensor.name.find(std::string(".0.feed_forward")) != std::string::npos
                 ) {
                     std::string fname = "ame_work/weights/";
+                    // fname += tensor.name;
+                    // printf("\nprinting to file %s\n", fname.c_str());
+
+                    // FILE* f = fopen(fname.c_str(), "w");
+
+                    // for (size_t i = 0; i < nelements; i++) {
+                    //     fprintf(f, "%f %u\n", f32_data[i], f16_data[i]);
+                    // }
+
+                    // fclose(f);
+
+                    fname = "ame_work/quant_diff/";
                     fname += tensor.name;
-                    printf("\nprinting to file %s\n", fname.c_str());
-
-                    FILE* f = fopen(fname.c_str(), "w");
-
-                    for (size_t i = 0; i < nelements; i++) {
-                        f32_data[i] = ggml_fp16_to_fp32(f16_data[i]);
-                        fprintf(f, "%f %u\n", f32_data[i], f16_data[i]);
-                    }
-
-                    fclose(f);
-                } else {
-                    for (size_t i = 0; i < nelements; i++) {
-                        f32_data[i] = ggml_fp16_to_fp32(f16_data[i]);
-                    }
+                    printf("\nsaving quant_diff to file %s\n", fname.c_str());
+                    debug_fp = fopen(fname.c_str(), "w");
                 }
             } else {
                 throw format("type %s unsupported for integer quantization", ggml_type_name(tensor.type));
@@ -2311,11 +2299,11 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
             }
 
             if (nthread_use < 2) {
-                new_size = ggml_quantize_chunk(new_type, f16_data, f32_data, new_data, 0, nelements, hist_cur.data(), extra_data, tensor.ne[0]);
+                new_size = ggml_quantize_chunk(new_type, f16_data, f32_data, new_data, 0, nelements, hist_cur.data(), extra_data, tensor.ne[0], debug_fp);
             } else {
                 size_t counter = 0;
                 new_size = 0;
-                auto compute = [&mutex, &counter, &hist_cur, extra_data, &new_size, tensor, new_type, f16_data, f32_data, new_data, nelements, chunk_size] () {
+                auto compute = [&mutex, &counter, &hist_cur, debug_fp, extra_data, &new_size, tensor, new_type, f16_data, f32_data, new_data, nelements, chunk_size] () {
                     std::vector<int64_t> local_hist;
                     size_t local_size = 0;
                     while (true) {
@@ -2335,7 +2323,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
                         if (local_hist.empty()) {
                             local_hist.resize(hist_cur.size(), 0);
                         }
-                        local_size += ggml_quantize_chunk(new_type, f16_data, f32_data, new_data, first, last - first, local_hist.data(), extra_data, tensor.ne[0]);
+                        local_size += ggml_quantize_chunk(new_type, f16_data, f32_data, new_data, first, last - first, local_hist.data(), extra_data, tensor.ne[0], debug_fp);
                     }
                 };
                 if ((int) workers.size() < nthread_use - 1) {
@@ -2350,14 +2338,22 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
                 }
             }
 
-            printf("size = %8.2f MB -> %8.2f MB | hist: ", tensor.size/1024.0/1024.0, new_size/1024.0/1024.0);
-            for (size_t i = 0; i < hist_cur.size(); i++) {
-                hist_all[i] += hist_cur[i];
+            if (debug_fp != NULL) {
+                fclose(debug_fp);
+            }
+            printf("size = %8.2f MB -> %8.2f MB", tensor.size/1024.0/1024.0, new_size/1024.0/1024.0);
+
+            if (new_type != GGML_TYPE_Q4_X) {
+                printf(" | hist: ");
+                for (size_t i = 0; i < hist_cur.size(); i++) {
+                    hist_all[i] += hist_cur[i];
+                }
+
+                for (size_t i = 0; i < hist_cur.size(); i++) {
+                    printf("%5.3f ", hist_cur[i] / float(nelements));
+                }
             }
 
-            for (size_t i = 0; i < hist_cur.size(); i++) {
-                printf("%5.3f ", hist_cur[i] / float(nelements));
-            }
             printf("\n");
         }
         total_size_org += tensor.size;

@@ -324,10 +324,10 @@ static const uint64_t table_b2b_1[1 << 8] = { B8(10, 00) }; // (!b) << 4
 // This is also true for POWER9.
 #if !defined(GGML_FP16_TO_FP32) || !defined(GGML_FP32_TO_FP16)
 
+// ame TODO: replaced the older memcpy with using the variable directly, not sure what
+// the effect is... 
 inline static float ggml_lookup_fp16_to_fp32(ggml_fp16_t f) {
-    uint16_t s;
-    memcpy(&s, &f, sizeof(uint16_t));
-    return table_f32_f16[s];
+    return table_f32_f16[f];
 }
 
 #define GGML_FP16_TO_FP32(x) ggml_lookup_fp16_to_fp32(x)
@@ -741,6 +741,7 @@ inline static int32x4_t vcvtnq_s32_f32(float32x4_t v) {
 #endif
 #endif
 
+// not actually used, it's here just for reference
 typedef struct {
     uint64_t is_fp16[QK4_X / 64];
     uint8_t values[1]; // This actually expands forwards in memory, depending on what weights we have
@@ -795,7 +796,7 @@ typedef struct {
 static_assert(sizeof(block_q8_1) == 2*sizeof(float) + QK8_1, "wrong q8_1 block size/padding");
 
 // reference implementation for deterministic creation of model files
-static void quantize_row_q4_0_reference(const float * restrict x, block_q4_0 * restrict y, int k) {
+static void quantize_row_q4_0_reference(const float * restrict x, block_q4_0 * restrict y, int k, FILE* debug_fp) {
     static const int qk = QK4_0;
 
     assert(k % qk == 0);
@@ -808,6 +809,8 @@ static void quantize_row_q4_0_reference(const float * restrict x, block_q4_0 * r
         float amax = 0.0f; // absolute max
         float max  = 0.0f;
 
+        float diffs[qk];
+        
         for (int j = 0; j < qk; j++) {
             const float v = x[i*qk + j];
             if (amax < fabsf(v)) {
@@ -830,36 +833,33 @@ static void quantize_row_q4_0_reference(const float * restrict x, block_q4_0 * r
 
             y[i].qs[j]  = xi0;
             y[i].qs[j] |= xi1 << 4;
+
+            if (debug_fp != NULL) {
+                float dequant = GGML_FP16_TO_FP32(y[i].d) * (xi0 - 8);
+                float diff = fabsf(dequant - x[i*qk + 0 + j]);
+                //printf("%f -> %d -> %f, diff = %f\n", x[i*qk + 0 + j], xi0, dequant, diff);
+
+                diffs[j] = diff;
+
+                dequant = GGML_FP16_TO_FP32(y[i].d) * (xi1 - 8);
+                diffs[qk/2 + j] = fabsf(dequant - x[i*qk + qk/2 + j]);
+            }
+        }
+
+        if (debug_fp != NULL) {
+            for (int j = 0; j < qk; j++) {
+                fprintf(debug_fp, "%f ", diffs[j]);
+            }
         }
     }
 }
 
 static void quantize_row_q4_0(const float * restrict x, void * restrict y, int k) {
-    quantize_row_q4_0_reference(x, y, k);
+    quantize_row_q4_0_reference(x, y, k, NULL);
 }
 
 // dropped this, since we aren't using any blocks
-// static void quantize_row_q4_x_reference(const ggml_fp16_t * restrict x, block_q4_x * restrict y, int k) {
-//     static const int qk = QK4_X;
-
-//     assert(k % qk == 0);
-
-//     const int nb = k / qk;
-    
-//     printf("quantizing %d blocks\n", nb);
-    
-//     // each 64 weights
-//     for (int i = 0; i < nb; i++) {
-//         for (int j = 0; j < qk; j++) {
-//             y[i].qs[j * 2] = (x[i*qk + j] >> 8);
-//             y[i].qs[j * 2 + 1] = (x[i*qk + j] & 0xFF);
-//         }
-//     }
-// }
-
-// static void quantize_row_q4_x(const ggml_fp16_t * restrict x, void * restrict y, int k) {
-//     quantize_row_q4_x_reference(x, y, k);
-// }
+// static void quantize_row_q4_x_reference(const ggml_fp16_t * restrict x, block_q4_x * restrict y, int k);
 
 static void quantize_row_q4_1_reference(const float * restrict x, block_q4_1 * restrict y, int k) {
     const int qk = QK4_1;
@@ -1420,27 +1420,6 @@ static void dequantize_row_q4_0(const block_q4_0 * restrict x, float * restrict 
             y[i*qk + j + qk/2] = x1*d;
         }
     }
-}
-
-static void dequantize_row_q4_x(const block_q4_x * restrict x, float * restrict y, int k) {
-    // TODO
-    // static const int qk = QK4_0;
-
-    // assert(k % qk == 0);
-
-    // const int nb = k / qk;
-
-    // for (int i = 0; i < nb; i++) {
-    //     const float d = GGML_FP16_TO_FP32(x[i].d);
-
-    //     for (int j = 0; j < qk/2; ++j) {
-    //         const int x0 = (x[i].qs[j] & 0x0F) - 8;
-    //         const int x1 = (x[i].qs[j] >>   4) - 8;
-
-    //         y[i*qk + j + 0   ] = x0*d;
-    //         y[i*qk + j + qk/2] = x1*d;
-    //     }
-    // }
 }
 
 static void dequantize_row_q4_1(const block_q4_1 * restrict x, float * restrict y, int k) {
@@ -15663,7 +15642,7 @@ enum ggml_opt_result ggml_opt(
 
 ////////////////////////////////////////////////////////////////////////////////
 
-size_t ggml_quantize_q4_0(const float * src, void * dst, int n, int k, int64_t * hist) {
+size_t ggml_quantize_q4_0(const float * src, void * dst, int n, int k, int64_t * hist, FILE* debug_fp) {
     assert(k % QK4_0 == 0);
 
     const int nb = k / QK4_0;
@@ -15672,13 +15651,13 @@ size_t ggml_quantize_q4_0(const float * src, void * dst, int n, int k, int64_t *
     for (int b = 0; b < n; b += k) {
         block_q4_0 * restrict y = (block_q4_0 *) dst + b/QK4_0;
 
-        quantize_row_q4_0_reference(src + b, y, k);
+        quantize_row_q4_0_reference(src + b, y, k, debug_fp);
 
         for (int i = 0; i < nb; i++) {
             for (int j = 0; j < QK4_0; j += 2) {
                 const uint8_t vi0 = y[i].qs[j/2] & 0x0F;
                 const uint8_t vi1 = y[i].qs[j/2] >> 4;
-
+                
                 hist[vi0]++;
                 hist[vi1]++;
             }
@@ -15688,7 +15667,7 @@ size_t ggml_quantize_q4_0(const float * src, void * dst, int n, int k, int64_t *
     return (n/QK4_0*sizeof(block_q4_0));
 }
 
-size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k, int64_t * hist, uint32_t * extra_data, uint32_t tensor_width) {
+size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k, int64_t * hist, uint32_t * extra_data, uint32_t tensor_width, FILE* debug_fp) {
     GGML_ASSERT(n == k);
 
     uint8_t * dst = (uint8_t*) dst_void;
@@ -15704,9 +15683,11 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
     
     uint32_t row_fp16s = 0;
 
+    float debug_vals[QK4_X];
+    
     for (int i = 0; i < nb; i++) {
         uint64_t fp16s[QK4_X / 64];
-
+        
         for (int j = 0; j < QK4_X / 64; j++) {
             fp16s[j] = 0;
         }
@@ -15717,6 +15698,7 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
         for (int j = 0; j < QK4_X; j++) {
             ggml_fp16_t x = src[i * QK4_X + j];
             float x_fp32 = GGML_FP16_TO_FP32(x);
+            debug_vals[j] = x_fp32;
 
             if (fabsf(x_fp32) > thresh) {
                 fp16s[j / 64] |= (uint64_t) 1 << (j % 64);
@@ -15777,14 +15759,15 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
         int fp16_count_chk = 0;
 
         uint8_t print_bits = 0;
+        uint8_t print_vals = 0;
         if ((i * QK4_X) % tensor_width == 0) {
             uint32_t row = (i * QK4_X) / tensor_width;
 
-            if (row <= 5) {
-                printf("row %d data:\n", row);
-                printf("fp16: %lx\n", *fp16s);
-                print_bits = 1;
-            }
+            // if (row <= 5) {
+            //     printf("row %d data:\n", row);
+            //     printf("fp16: %lx\n", *fp16s);
+            //     print_bits = 1;
+            // }
         }
         
         for (int j = 0; j < QK4_X; j++) {
@@ -15795,10 +15778,14 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
                 write_bits(data, bit_offset, x, 16);
                 bit_offset += 16;
                 fp16_count_chk += 1;
+
                 if (print_bits) {
                     printf("%02x%02xh ", x >> 8, x & 0xFF);
                 }
 
+                if (debug_fp != NULL) {
+                    fprintf(debug_fp, "0 ");
+                }
             } else {
                 uint8_t q = 0;
                 float min_dist = fabsf(x_fp32 - qvals[0]);
@@ -15817,17 +15804,89 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
                 if (print_bits) {
                     printf("%d%d%d%d ", (q >> 3) & 1, (q >> 2) & 1, (q >> 1) & 1, q & 1);
                 }
+
+                if (debug_fp != NULL || true) {
+                    float diff = fabsf(x_fp32 - qvals[q]);
+
+                    if (diff >= 0.02) {
+                        print_vals = 1;
+                        printf("%f -> %d -> %f, diff = %f\n", x_fp32, q, qvals[q], diff);
+                    }
+                    
+                    // fprintf(debug_fp, "%f ", diff); // this should be equal to min_dist actually
+                }
+            }
+        }
+        
+        if (print_vals) {
+            // sort
+            for (int j = 0; j < QK4_X; j++) {
+                float mini = debug_vals[QK4_X - 1];
+                int choice = QK4_X - 1;
+
+                for (int j2 = j; j2 < QK4_X; j2++) {
+                    if (debug_vals[j2] < mini) {
+                        mini = debug_vals[j2];
+                        choice = j2;
+                    }
+                }
+
+                float exch = debug_vals[j];
+                debug_vals[j] = debug_vals[choice];
+                debug_vals[choice] = exch;
+            }
+
+            uint32_t row = (i * QK4_X) / tensor_width;
+
+            if (row % 127 == 0 || true) {
+                printf("row %d, block #%d\n", row, i - row * tensor_width / QK4_X);
+                for (int j = 0; j < QK4_X; j++) {
+                    if (fabsf(debug_vals[j]) <= 0.001 || true) {
+                        printf("%-2.6f ", debug_vals[j]);
+                    }
+                }
+                
+                // int start_id = 0;
+                // for (int j = 0; j < QK4_X; j++) {
+                //     if (fabsf(debug_vals[j]) <= thresh) {
+                //         start_id = j;
+                //         break;
+                //     }
+                // }
+
+                // int end_id = QK4_X;
+                // for (int j = QK4_X - 1; j >= start_id; j--) {
+                //     if (fabsf(debug_vals[j]) <= thresh) {
+                //         end_id = j + 1;
+                //         break;
+                //     }
+                // }
+
+                // printf("row %d, block #%d, normals %d, dist %f: ", row, i - row * tensor_width / QK4_X, end_id - start_id, debug_vals[end_id - 1] - debug_vals[start_id]);
+
+                // for (int j = start_id; j < end_id; j++) {
+                //     if (j - start_id <= 1 || end_id - 1 - j <= 1 || true) {
+                //         printf("%-2.6f ", debug_vals[j]);
+                //     }
+                // }
+                
+                // for (int j = 0; j < QK4_X; j++) {
+                //     printf("%-2.6f ", debug_vals[j]);
+                // }
+                //printf("%-2.6f %-2.6f", debug_vals[0], debug_vals[QK4_X - 1]);
+                // printf("\n\n");
             }
         }
 
         if (print_bits) {
-            printf("\n");
+            // printf("\n");
 
-            uint32_t row = (i * QK4_X) / tensor_width;
-            printf("memory data, row %d:\n", row);
+            // uint32_t row = (i * QK4_X) / tensor_width;
+            // printf("memory data, row %d:\n", row);
 
-            printf("data offset: %u\n", dst_offset);
-            printf("%x %x %x %x\n", data[0], data[1], data[2], data[3]);
+            // printf("data offset: %u\n", dst_offset);
+            // printf("%x %x %x %x\n", data[0], data[1], data[2], data[3]);
+
 
             // uint16_t w = 0;
             // uint32_t offset = 0;
@@ -15871,17 +15930,19 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
                 extra_data[row - 1] += extra_data[row - 2]; // rolling sum
             }
 
-            if (row <= 5) {
-                printf("fp16s until row %d: %u\n", row, extra_data[row - 1]);
-                printf("fp16_count: %d\n", row_fp16s);
-            }
+            if (print_bits) {
+                // if (row <= 5) {
+                //     printf("fp16s until row %d: %u\n", row, extra_data[row - 1]);
+                //     printf("fp16_count: %d\n", row_fp16s);
+                // }
 
-            // if (row < 16) {
-            //     printf("%d ", extra_data[row - 1]);
-            //     if (row == 15) {
-            //         printf("...");
-            //     }
-            // }
+                // if (row < 16) {
+                //     printf("%d ", extra_data[row - 1]);
+                //     if (row == 15) {
+                //         printf("...");
+                //     }
+                // }
+            }
 
             //printf("row %d, fp16s: %d, rolling sum: %d\n", row, row_fp16s, extra_data[row - 1]);
             row_fp16s = 0;
@@ -16006,20 +16067,20 @@ size_t ggml_quantize_q8_0(const float * src, void * dst, int n, int k, int64_t *
     return (n/QK8_0*sizeof(block_q8_0));
 }
 
-size_t ggml_quantize_chunk(enum ggml_type type, const ggml_fp16_t * src_raw, const float * src, void * dst, int start, int n, int64_t * hist, uint32_t * extra_data, uint32_t tensor_width) {
+size_t ggml_quantize_chunk(enum ggml_type type, const ggml_fp16_t * src_raw, const float * src, void * dst, int start, int n, int64_t * hist, uint32_t * extra_data, uint32_t tensor_width, FILE* debug_fp) {
     size_t result = 0;
     switch (type) {
         case GGML_TYPE_Q4_0:
             {
                 GGML_ASSERT(start % QK4_0 == 0);
                 block_q4_0 * block = (block_q4_0*)dst + start / QK4_0;
-                result = ggml_quantize_q4_0(src + start, block, n, n, hist);
+                result = ggml_quantize_q4_0(src + start, block, n, n, hist, debug_fp);
             } break;
         case GGML_TYPE_Q4_X:
             {
                 // For Q4_X we quantize only the entire tensor at once
                 GGML_ASSERT(start == 0);
-                result = ggml_quantize_q4_x(src_raw, dst, n, n, hist, extra_data, tensor_width);
+                result = ggml_quantize_q4_x(src_raw, dst, n, n, hist, extra_data, tensor_width, debug_fp);
             } break;
         case GGML_TYPE_Q4_1:
             {

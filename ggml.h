@@ -1244,14 +1244,14 @@ inline static void print_tensor_qx(uint32_t * data, uint32_t * extra_data, uint6
     // quantization
     //
 
-    GGML_API size_t ggml_quantize_q4_0(const float * src, void * dst, int n, int k, int64_t * hist);
-    GGML_API size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst, int n, int k, int64_t * hist, uint32_t * extra_data, uint32_t tensor_width);
+    GGML_API size_t ggml_quantize_q4_0(const float * src, void * dst, int n, int k, int64_t * hist, FILE* debug_fp);
+    GGML_API size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst, int n, int k, int64_t * hist, uint32_t * extra_data, uint32_t tensor_width, FILE* debug_fp);
     GGML_API size_t ggml_quantize_q4_1(const float * src, void * dst, int n, int k, int64_t * hist);
     GGML_API size_t ggml_quantize_q5_0(const float * src, void * dst, int n, int k, int64_t * hist);
     GGML_API size_t ggml_quantize_q5_1(const float * src, void * dst, int n, int k, int64_t * hist);
     GGML_API size_t ggml_quantize_q8_0(const float * src, void * dst, int n, int k, int64_t * hist);
 
-    GGML_API size_t ggml_quantize_chunk(enum ggml_type type, const ggml_fp16_t * src_raw, const float * src, void * dst, int start, int n, int64_t * hist, uint32_t * extra_data, uint32_t tensor_width);
+    GGML_API size_t ggml_quantize_chunk(enum ggml_type type, const ggml_fp16_t * src_raw, const float * src, void * dst, int start, int n, int64_t * hist, uint32_t * extra_data, uint32_t tensor_width, FILE* debug_fp);
 
     //
     // system info
