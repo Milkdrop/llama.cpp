@@ -2348,13 +2348,14 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
         }
         total_size_org += tensor.size;
         total_size_new += new_size;
+
+        printf("total model size = %8.2f MB\n", total_size_new/1024.0/1024.0);
         
         file_saver.write_tensor(tensor, new_type, new_data, new_size, extra_data);
     }
 
     printf("%s: model size  = %8.2f MB\n", __func__, total_size_org/1024.0/1024.0);
     printf("%s: quant size  = %8.2f MB\n", __func__, total_size_new/1024.0/1024.0);
-
     {
         int64_t sum_all = 0;
         for (size_t i = 0; i < hist_all.size(); i++) {

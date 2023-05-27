@@ -2179,8 +2179,8 @@ static void ggml_vec_dot_q4_x_q8_0(uint8_t * row_data, const uint16_t row_width,
 
     // todo
     uint32_t nb = row_width / QK4_X;
-    float qvals[1 << QK4_QBits] = {-0.4, -0.2, -0.05, -0.02, -0.01, -0.005, -0.00025, -0.0001,
-                                    0.4,  0.2,  0.05,  0.02,  0.01,  0.005,  0.00025,  0.0001};
+    float qvals[1 << QK4_QBits] = {-0.04, -0.03, -0.02, -0.01, -0.005, -0.001, -0.00025, -0.0001,
+                                    0.04,  0.03,  0.02,  0.01,  0.005,  0.001,  0.00025,  0.0001};
 
     double sumf = 0.0;
     GGML_ASSERT(QK4_X % QK8_0 == 0);
@@ -15689,7 +15689,7 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
         }
 
         int fp16_count = 0;
-        float thresh = 0.1;
+        float thresh = 0.05;
 
         for (int j = 0; j < QK4_X; j++) {
             ggml_fp16_t x = src[i * QK4_X + j];
@@ -15777,8 +15777,8 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
         uint32_t * data = (uint32_t*) (dst + dst_offset);
 
         ///float qvals[4] = {-0.35, -0.15, 0.15, 0.35};
-        float qvals[1 << QK4_QBits] = {-0.4, -0.2, -0.05, -0.02, -0.01, -0.005, -0.00025, -0.0001,
-                                        0.4,  0.2,  0.05,  0.02,  0.01,  0.005,  0.00025,  0.0001};
+        float qvals[1 << QK4_QBits] = {-0.04, -0.03, -0.02, -0.01, -0.005, -0.001, -0.00025, -0.0001,
+                                        0.04,  0.03,  0.02,  0.01,  0.005,  0.001,  0.00025,  0.0001};
 
         int fp16_count_chk = 0;
 
