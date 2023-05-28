@@ -15823,10 +15823,10 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
     }
 
     float max_quantization_error = 0.006;
-    uint8_t qbits = 4;
 
     for (int i = 0; i < nb; i++) {
         uint64_t fp16s[QK4_X / 64];
+        uint8_t qbits = 4;
         
         for (int j = 0; j < QK4_X / 64; j++) {
             fp16s[j] = 0;
@@ -15866,7 +15866,7 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
         //printf("total bits: %u\n", total_bits);
         
         while ((total_bits % 8) != 0) {
-            total_bits += 16 - 4; // simulate the replacement of a 3bit weight with a 16bit one
+            total_bits += 16 - qbits; // simulate the replacement of a 3bit weight with a 16bit one
         }
 
         for (uint8_t test_qbit = 3; test_qbit >= 1; test_qbit--) {
@@ -15904,7 +15904,7 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
             }
             
             if (total_bits_in_test_qbit < total_bits) {
-                printf("switching to %dbit! %d vs %d\n", test_qbit, total_bits, total_bits_in_test_qbit);
+                //printf("switching to %dbit! %d vs %d\n", test_qbit, total_bits, total_bits_in_test_qbit);
 
                 total_bits = total_bits_in_test_qbit;
                 qbits = test_qbit;
