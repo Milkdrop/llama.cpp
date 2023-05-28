@@ -812,6 +812,7 @@ struct llama_model_loader {
         for (int i = 0; i < (1 << QK4_QBits); i++) {
             printf("%d, ", ggml_fp32_to_fp16(qvals[i]));
         }
+        printf("\n");
     }
 
     void load_data_for(llama_load_tensor & lt) {
@@ -1246,18 +1247,25 @@ static void llama_model_load_internal(
     // }
 
     // test get_bits
-    uint32_t test[4];
-    for (int i = 0; i < 4; i++) {
-        test[i] = 0;
-    }
+    // uint32_t test[4];
+    // for (int i = 0; i < 4; i++) {
+    //     test[i] = 0;
+    // }
 
-    printf("test %x %x\n", test[0], test[1]);
-    write_bits(test, 29, 253, 16);
-    printf("test %x %x\n", test[0], test[1]);
+    // printf("test %x %x\n", test[0], test[1]);
+    // write_bits(test, 29, 253, 16);
+    // printf("test %x %x\n", test[0], test[1]);
 
-    uint16_t num = 0;
-    get_bits(test, 29, &num, 16);
-    printf("test %d\n", num);
+    // uint16_t num = 0;
+    // get_bits(test, 29, &num, 16);
+    // printf("test %d\n", num);
+    // GGML_ASSERT(num == 253);
+
+    // write_bits(test, 3, 14, 4);
+    // uint16_t num2 = 0;
+    // get_bits(test, 3, &num2, 4);
+
+    // GGML_ASSERT(num2 == 14);
 
     if (progress_callback) {
         progress_callback(1.0f, progress_callback_user_data);

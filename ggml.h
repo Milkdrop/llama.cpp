@@ -202,6 +202,10 @@
 #define GGML_MAX_OPT           4
 #define GGML_DEFAULT_N_THREADS 4
 
+// not sure if these are portable or not
+#define likely(x)       __builtin_expect((x),1)
+#define unlikely(x)     __builtin_expect((x),0)
+
 #define GGML_ASSERT(x) \
     do { \
         if (!(x)) { \
@@ -269,27 +273,55 @@ inline static void* ggml_aligned_malloc(size_t size) {
 //     }
 // }
 
-inline static void get_bits(const uint32_t * src, uint16_t bit_offset, uint16_t * data, uint16_t bit_count) {
+// inline static uint16_t get_bits_aligned(const uint32_t src, const uint8_t bit_offset, const uint8_t bit_count) {
+//     return (src >> bit_offset) & ((1 << bit_count) - 1);
+// }
+
+inline static void get_bits(const uint32_t * src, uint32_t bit_offset, uint16_t * data, const uint8_t bit_count) {
     const uint32_t chunk_size = (sizeof(uint32_t) * 8);
 
     const uint32_t chunk_id = bit_offset / chunk_size;
-    src = src + chunk_id;
+    src += chunk_id;
     bit_offset %= chunk_size;
 
     if (bit_offset + bit_count <= chunk_size) {
-        *data = (*src >> bit_offset) & ((1 << bit_count) - 1);
+        // uint16_t val1 = (*src >> bit_offset) & ((1 << bit_count) - 1);
+        // uint16_t val2 = ((*src >> bit_offset) << (32 - bit_count)) >> (32 - bit_count);
+
+        // if (val1 != val2) {
+        //     printf("val1 != val2, %d != %d, byte %x, offset: %d, count: %d\n", val1, val2, *src, bit_offset, bit_count);
+        // }
+
+        *data = ((*src >> bit_offset) << (32 - bit_count)) >> (32 - bit_count);
+        //*data = ((*src >> bit_offset) << (~bit_count & 31 + 1)) >> (~bit_count & 31 + 1);
     } else {
         // first fill the current chunk
-        uint16_t bitcount_1 = chunk_size - bit_offset;
+        const uint8_t bitcount_1 = chunk_size - bit_offset;
 
-        *data = (*src >> bit_offset) & ((1 << bitcount_1) - 1);
+        // uint16_t val1 = (*src >> bit_offset) & ((1 << bitcount_1) - 1);
+        // uint16_t val2 = ((uint32_t) (*src >> bit_offset) << (32 - bitcount_1)) >> (32 - bitcount_1);
+
+        // if (val1 != val2) {
+        //     printf("val1 != val2, %d != %d, byte %x, offset: %d, count: %d\n", val1, val2, *src, bit_offset, bit_count);
+        // }
+
+        *data = ((uint32_t) (*src >> bit_offset) << (32 - bitcount_1)) >> (32 - bitcount_1);
+        //*data = ((uint32_t) (*src >> bit_offset) << (~bitcount_1 & 31 + 1)) >> (~bitcount_1 & 31 + 1);
 
         // move onto the next chunk
-        bit_count -= bitcount_1;
+        const uint8_t bitcount_2 = bit_count - bitcount_1;
         bit_offset = 0;
         src += 1;
 
-        *data |= (*src & ((1 << bit_count) - 1)) << bitcount_1;
+        // val1 = (*src & ((1 << bit_count) - 1)) << bitcount_1;
+        // val2 = ((uint32_t) (*src << (32 - bitcount_2)) >> (32 - bitcount_2)) << bitcount_1;
+        
+        // if (val1 != val2) {
+        //     printf("val1 != val2, %d != %d, byte %x, offset: %d, count: %d\n", val1, val2, *src, bit_offset, bit_count);
+        // }
+
+        *data |= ((uint32_t) (*src << (32 - bitcount_2)) >> (32 - bitcount_2)) << bitcount_1;
+        //*data |= ((uint32_t) (*src << (~bitcount_2 & 31 + 1)) >> (~bitcount_2 & 31 + 1)) << bitcount_1;
     }
 }
 
