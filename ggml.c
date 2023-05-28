@@ -2172,10 +2172,6 @@ inline static void ggml_vec_dot_f16(const int n, float * restrict s, ggml_fp16_t
     *s = sumf;
 }
 
-
-// just for local testing / code highlighting
-#define __AVX2__
-
 __attribute__((optimize("unroll-loops")))
 static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row_width, float * restrict result, const void * restrict column_ptr) {
     uint32_t nb = row_width / QK4_X;
@@ -2188,9 +2184,11 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
     float row_data[QK4_X]; // accessed via row_ptr
 
     const block_q8_0 * restrict column = column_ptr;
-    float sumf = 0.0;
+    // float sumf = 0.0;
     
     uint32_t column_idx = 0;
+
+    __m256 rolling_sum = _mm256_setzero_ps();
 
     for (int b = 0; b < nb; b++) {
         float * row_ptr = row_data;
@@ -2223,7 +2221,7 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
                     
                     for (int i = 0; i < num_of_data_blocks_needed; i++) {
                         for (int k = 0; k < weights_per_u64_data_block; k ++) {
-                            row_ptr[i * weights_per_u64_data_block + k] = min_value + ((((uint64_t *) data_start)[0] >> (k * QK4_QBits)) & ((1 << 4) - 1)) * mult_value;
+                            row_ptr[i * weights_per_u64_data_block + k] = min_value + ((((uint64_t *) data_start)[0] >> (k * QK4_QBits)) & ((1 << QK4_QBits) - 1)) * mult_value;
                         }
 
                         data_start += (data_block_size / 8) / sizeof(uint16_t);
@@ -2238,7 +2236,7 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
                     for (int i = 0; i < num_of_data_blocks_needed; i++) {
                         for (int k = 0; k < weights_per_u32_data_block; k ++) {
                             // here we cast to 64bit, to make sure that we don't lose bits that are outside the u32 range
-                            row_ptr[i * weights_per_u32_data_block + k] = min_value + ((((uint64_t *) data_start)[0] >> (data_offset + k * QK4_QBits)) & ((1 << 4) - 1)) * mult_value;
+                            row_ptr[i * weights_per_u32_data_block + k] = min_value + ((((uint64_t *) data_start)[0] >> (data_offset + k * QK4_QBits)) & ((1 << QK4_QBits) - 1)) * mult_value;
                         }
 
                         data_start += (data_block_size / 8) / sizeof(uint16_t);
@@ -2260,9 +2258,9 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
 
                         data_offset += QK4_QBits;
 
-                        if (data_offset % 16 == 0) {
+                        if (data_offset >= 16) {
                             data_start += 1;
-                            data_offset = 0;
+                            data_offset -= 16;
                         }
                     }
 
@@ -2293,11 +2291,24 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
         for (int jb = 0; jb < QK4_X / QK8_0; jb++) {
             float block_sum = 0;
 
-            for (int i = 0; i < QK8_0; i++) {
-                block_sum += row_data[jb * QK8_0 + i] * column[column_idx].qs[i];
+            __m256 column_multiplier = _mm256_set1_ps(GGML_FP16_TO_FP32(column[column_idx].d));
+
+            for (int i = 0; i < QK8_0/8; i++) {
+                __m128i test = _mm_loadu_si128((const __m128i *) (column[column_idx].qs + i * 8));
+                __m256i work = _mm256_cvtepi8_epi32(test);
+                __m256 workf = _mm256_cvtepi32_ps(work);
+                
+                // multiply with our 8 parts of the row at row_data
+                __m256 row = _mm256_loadu_ps(row_data + jb * QK8_0 + i * 8);
+
+                workf = _mm256_mul_ps(workf, row);
+                rolling_sum = _mm256_fmadd_ps(workf, column_multiplier, rolling_sum);
+                
+                // printf("\n");
+                // block_sum += row_data[jb * QK8_0 + i] * column[column_idx].qs[i];
             }
 
-            sumf += block_sum * GGML_FP16_TO_FP32(column[column_idx].d);
+            //sumf += block_sum * GGML_FP16_TO_FP32(column[column_idx].d);
             column_idx += 1;
         }
 
@@ -2305,35 +2316,15 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
         GGML_ASSERT(offset % 8 == 0);
         quant_row += offset / 8;
     }
-
-    *result = sumf;
-}
-
-// static void ggml_vec_dot_f16_q8_0(const float * src_row, const uint16_t row_width, float * restrict result, const void * restrict column_ptr) {
-//     const int qk = QK8_0;
-//     const int nb = row_width / qk;
-
-//     assert(row_width % qk == 0);
-//     assert(nb % 2 == 0);
-
-//     const block_q8_0 * restrict column = column_ptr;
-
-//     // scalar
-//     float sumf = 0.0;
     
-//     for (int i = 0; i < nb; i++) {
-//         float block_sum = 0;
-
-//         for (int j = 0; j < qk; ++j) {
-//             block_sum += src_row[i * qk + j] * column[i].qs[j];
-//         }
-
-//         sumf += block_sum*GGML_FP16_TO_FP32(column[i].d);
-//     }
-
-//     *result = sumf;
-
-// }
+    float rolling_sum_vec[8];
+    _mm256_store_ps(rolling_sum_vec, rolling_sum);
+    
+    *result = 0;
+    for (int i = 0; i < 8; i++) {
+        *result += rolling_sum_vec[i];
+    }
+}
 
     // __m256i work = _mm256_loadu_epi8((const __m256i *) column[i].qs);
 
@@ -15999,10 +15990,10 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
                     fprintf(debug_fp, "%f ", diff); // this should be equal to min_dist actually
                 }
 
-                if (diff >= 0.01) {
-                    print_vals = 1;
-                    printf("%f -> %d -> %f, diff = %f\n", x_fp32, q, qvals[q], diff);
-                }
+                // if (diff >= 0.01) {
+                //     print_vals = 1;
+                //     printf("%f -> %d -> %f, diff = %f\n", x_fp32, q, qvals[q], diff);
+                // }
             }
         }
         
