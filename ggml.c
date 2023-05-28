@@ -2180,8 +2180,7 @@ __attribute__((optimize("unroll-loops")))
 static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row_width, float * restrict result, const void * restrict column_ptr) {
     uint32_t nb = row_width / QK4_X;
 
-    float qvals[1 << QK4_QBits] = {-0.04, -0.03, -0.02, -0.01, -0.005, -0.001, -0.00025, -0.0001,
-                                    0.04,  0.03,  0.02,  0.01,  0.005,  0.001,  0.00025,  0.0001};
+    // float qvals[1 << QK4_QBits] = {-0.04, -0.03, -0.02, -0.01, -0.005, -0.001, -0.00025, -0.0001, 0.04,  0.03,  0.02,  0.01,  0.005,  0.001,  0.00025,  0.0001};
 
     GGML_ASSERT(QK4_X % QK8_0 == 0);
     // GGML_ASSERT(QK4_QBits == 4); // if not, update the block inside (fp16_chooser == 0)
@@ -2200,9 +2199,14 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
         float * row_ptr = row_data;
 
         const uint64_t * block_start = (uint64_t *) quant_row;
-        const uint16_t * data_start = (uint16_t *) (block_start + (QK4_X / 64));
+
+        const float min_value = GGML_FP16_TO_FP32(*((uint16_t *) (block_start + (QK4_X / 64))));
+        const float mult_value = GGML_FP16_TO_FP32(*((uint16_t *) (block_start + (QK4_X / 64)) + 1)) / (1 << QK4_QBits);
+        const uint16_t * data_start = (uint16_t *) (block_start + (QK4_X / 64)) + 2;
+
         //const uint32_t * data_start_32 = (uint32_t *) (block_start + (QK4_X / 64));
         // const uint64_t * data_start_64 = (uint64_t *) (block_start + (QK4_X / 64));
+        
         quant_row = (uint8_t * ) data_start;
 
         uint32_t offset = 0;
@@ -2222,7 +2226,7 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
                     
                     for (int i = 0; i < num_of_data_blocks_needed; i++) {
                         for (int k = 0; k < weights_per_u64_data_block; k ++) {
-                            row_ptr[i * weights_per_u64_data_block + k] = GGML_FP16_TO_FP32(qvals_f16[(((uint64_t *) data_start)[0] >> (k * QK4_QBits)) & ((1 << 4) - 1)]);
+                            row_ptr[i * weights_per_u64_data_block + k] = min_value + ((((uint64_t *) data_start)[0] >> (k * QK4_QBits)) & ((1 << 4) - 1)) * mult_value;
                         }
 
                         data_start += (range / 8) / sizeof(uint16_t);
@@ -2237,7 +2241,7 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
                     for (int i = 0; i < num_of_data_blocks_needed; i++) {
                         for (int k = 0; k < weights_per_u32_data_block; k ++) {
                             // here we cast to 64bit, to make sure that we don't lose bits that are outside the u32 range
-                            row_ptr[i * weights_per_u32_data_block + k] = GGML_FP16_TO_FP32(qvals_f16[(((uint64_t *) data_start)[0] >> (data_offset + k * QK4_QBits)) & ((1 << 4) - 1)]);
+                            row_ptr[i * weights_per_u32_data_block + k] = min_value + ((((uint64_t *) data_start)[0] >> (data_offset + k * QK4_QBits)) & ((1 << 4) - 1)) * mult_value;
                         }
 
                         data_start += (range / 8) / sizeof(uint16_t);
@@ -2255,7 +2259,7 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
                         data_start += 1;
                     } else {
                         offset += QK4_QBits;
-                        row_ptr[i] = GGML_FP16_TO_FP32(qvals_f16[(((uint32_t *) data_start)[0] >> data_offset) & ((1 << QK4_QBits) - 1)]);
+                        row_ptr[i] = min_value + ((((uint32_t *) data_start)[0] >> data_offset) & ((1 << QK4_QBits) - 1)) * mult_value;
 
                         data_offset += QK4_QBits;
 
@@ -15851,7 +15855,7 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
                 float x_fp32 = GGML_FP16_TO_FP32(x);
                 
                 // weight is not on 16bit
-                if (!(fp16s[j / 64] & ((uint64_t) 1 << (j % 64)))) {
+                if ((fp16s[j / 64] & ((uint64_t) 1 << (j % 64))) == 0) {
                     float diff = fabsf(x_fp32);
                     if (diff > maxi || target == -1) {
                         maxi = diff;
@@ -15880,12 +15884,69 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
 
         dst_offset += (QK4_X / 64) * sizeof(uint64_t);
 
+        float min_value = 10000;
+        float max_value = -10000;
+        float mult_range = 0;
+
+        for (int j = 0; j < QK4_X; j++) {
+            // weight not on 16bit
+            if ((fp16s[j / 64] & ((uint64_t) 1 << (j % 64))) == 0) {
+                ggml_fp16_t x = src[i * QK4_X + j];
+                float x_fp32 = GGML_FP16_TO_FP32(x);
+
+                if (x_fp32 < min_value) {
+                    min_value = x_fp32;
+                }
+
+                if (x_fp32 > max_value) {
+                    max_value = x_fp32;
+                }
+            }
+        }
+
+        mult_range = max_value - min_value;
+
+        // write min value and multiplier (min_value + mult * quant_number, result should be divided by (1 << QBits) during multplication)
+        *((uint16_t*) (dst + dst_offset)) = ggml_fp32_to_fp16(min_value);
+        dst_offset += sizeof(uint16_t);
+        
+        *((uint16_t*) (dst + dst_offset)) = ggml_fp32_to_fp16(mult_range);
+        dst_offset += sizeof(uint16_t);
+
+        float qvals[1 << QK4_QBits];
+        
+        //printf("qvals\n");
+        for (int i = 0; i < (1 << QK4_QBits); i++) {
+            qvals[i] = min_value + (mult_range * i) / (1 << QK4_QBits);
+            //printf("%f ", qvals[i]);
+        }
+
+        // printf("\nfor\n");
+        // // sort 
+        // for (int j = 0; j < QK4_X; j++) {
+        //     float mini = debug_vals[QK4_X - 1];
+        //     int choice = QK4_X - 1;
+
+        //     for (int j2 = j; j2 < QK4_X; j2++) {
+        //         if (debug_vals[j2] < mini) {
+        //             mini = debug_vals[j2];
+        //             choice = j2;
+        //         }
+        //     }
+
+        //     float exch = debug_vals[j];
+        //     debug_vals[j] = debug_vals[choice];
+        //     debug_vals[choice] = exch;
+        // }
+
+        // for (int j = 0; j < QK4_X; j++) {
+        //     float x_fp32 = debug_vals[j];
+        //     printf("%f ", x_fp32);
+        // }
+        // printf("\n");
+
         uint64_t bit_offset = 0;
         uint32_t * data = (uint32_t*) (dst + dst_offset);
-
-        ///float qvals[4] = {-0.35, -0.15, 0.15, 0.35};
-        float qvals[1 << QK4_QBits] = {-0.04, -0.03, -0.02, -0.01, -0.005, -0.001, -0.00025, -0.0001,
-                                        0.04,  0.03,  0.02,  0.01,  0.005,  0.001,  0.00025,  0.0001};
 
         int fp16_count_chk = 0;
 
@@ -15941,14 +16002,19 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
                     fprintf(debug_fp, "%f ", diff); // this should be equal to min_dist actually
                 }
 
-                // if (diff >= 0.005) {
-                //     print_vals = 1;
-                //     printf("%f -> %d -> %f, diff = %f\n", x_fp32, q, qvals[q], diff);
-                // }
+                if (diff >= 0.01) {
+                    print_vals = 1;
+                    printf("%f -> %d -> %f, diff = %f\n", x_fp32, q, qvals[q], diff);
+                }
             }
         }
         
         if (print_vals) {
+            printf("qvals\n");
+            for (int i = 0; i < (1 << QK4_QBits); i++) {
+                printf("%f ", qvals[i]);
+            }
+
             // sort
             for (int j = 0; j < QK4_X; j++) {
                 float mini = debug_vals[QK4_X - 1];
