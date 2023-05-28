@@ -2219,28 +2219,14 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
                     const uint8_t data_block_size = 64;
                     // we can take a full 64bit block
                     const uint8_t weights_per_u64_data_block = data_block_size / QK4_QBits;
-
-                    const uint8_t num_of_q8_blocks = 64 / QK8_0;
-                    const uint8_t num_of_data_blocks_per_q8 = QK8_0 / weights_per_u64_data_block; // because we have 64 qbit-sized weights here 
+                    const uint8_t num_of_data_blocks_needed = 64 / weights_per_u64_data_block; // because we have 64 qbit-sized weights here 
                     
-                    for (int q8_pair = 0; q8_pair < num_of_q8_blocks; q8_pair++) {
-                        uint8_t column_idx_i = 0;
-                        int sum_ys = 0;
-                        int sum_xys = 0;
-
-                        for (int i = 0; i < num_of_data_blocks_per_q8; i++) {
-                            for (int k = 0; k < weights_per_u64_data_block; k ++) {
-                                sum_ys += column[column_idx].qs[column_idx_i];
-                                sum_xys += ((((uint64_t *) data_start)[0] >> (k * QK4_QBits)) & ((1 << 4) - 1)) * column[column_idx].qs[column_idx_i];
-                                //row_ptr[i * weights_per_u64_data_block + k] = min_value + ((((uint64_t *) data_start)[0] >> (k * QK4_QBits)) & ((1 << 4) - 1)) * mult_value;
-
-                            }
-
-                            data_start += (data_block_size / 8) / sizeof(uint16_t);
+                    for (int i = 0; i < num_of_data_blocks_needed; i++) {
+                        for (int k = 0; k < weights_per_u64_data_block; k ++) {
+                            row_ptr[i * weights_per_u64_data_block + k] = min_value + ((((uint64_t *) data_start)[0] >> (k * QK4_QBits)) & ((1 << 4) - 1)) * mult_value;
                         }
 
-                        sumf += (float) sum_ys * min_value + (float) sum_xys * mult_value;
-                        column_idx += 1;
+                        data_start += (data_block_size / 8) / sizeof(uint16_t);
                     }
 
                 } else {
@@ -2257,18 +2243,6 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
 
                         data_start += (data_block_size / 8) / sizeof(uint16_t);
                     }
-
-                    float block_sum = 0;
-                    for (int jb = 0; jb < QK4_X / QK8_0; jb++) {
-
-                        for (int i = 0; i < QK8_0; i++) {
-                            block_sum += row_data[jb * QK8_0 + i] * column[column_idx].qs[i];
-                        }
-
-                        sumf += block_sum * GGML_FP16_TO_FP32(column[column_idx].d);
-                        column_idx += 1;
-                    }
-                    sumf += block_sum;
                 }
 
                 offset += QK4_QBits * 64;
@@ -2305,18 +2279,6 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
                     //     row_save[i] = w;
                     // }
                 }
-
-                float block_sum = 0;
-                for (int jb = 0; jb < QK4_X / QK8_0; jb++) {
-
-                    for (int i = 0; i < QK8_0; i++) {
-                        block_sum += row_data[jb * QK8_0 + i] * column[column_idx].qs[i];
-                    }
-
-                    sumf += block_sum * GGML_FP16_TO_FP32(column[column_idx].d);
-                    column_idx += 1;
-                }
-                sumf += block_sum;
             }
 
             // horrible manual loop unroll for testing, 1 iteration only
@@ -2326,6 +2288,17 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
             // if (unlikely(fp16_chooser & 1)) { get_bits(data_start, offset, &w, 16); offset += 16; row_save[i] = w; } else { get_bits(data_start, offset, &w, QK4_QBits); offset += QK4_QBits; row_save[i] = qvals_f16[w]; } fp16_chooser >>= 1; i++;
             
             row_ptr += 64;
+        }
+
+        for (int jb = 0; jb < QK4_X / QK8_0; jb++) {
+            float block_sum = 0;
+
+            for (int i = 0; i < QK8_0; i++) {
+                block_sum += row_data[jb * QK8_0 + i] * column[column_idx].qs[i];
+            }
+
+            sumf += block_sum * GGML_FP16_TO_FP32(column[column_idx].d);
+            column_idx += 1;
         }
 
         //printf("offset: %d\n", offset);
