@@ -2180,12 +2180,15 @@ static void dequantize_row_q4_x(const uint8_t * row_data, const uint16_t row_wid
                                     0.04,  0.03,  0.02,  0.01,  0.005,  0.001,  0.00025,  0.0001};
 
     GGML_ASSERT(QK4_X % QK8_0 == 0);
-    
+    // GGML_ASSERT(QK4_QBits == 4); // if not, update the block inside (fp16_chooser == 0)
+
     uint16_t qvals_f16[1 << QK4_QBits] = {43295, 42926, 42271, 41247, 40223, 37913, 35865, 34446,
                                         10527, 10158, 9503, 8479, 7455, 5145, 3097, 1678};
     for (int b = 0; b < nb; b++) {
         const uint64_t * block_start = (uint64_t *) row_data;
         const uint16_t * data_start = (uint16_t *) (block_start + (QK4_X / 64));
+        //const uint32_t * data_start_32 = (uint32_t *) (block_start + (QK4_X / 64));
+        // const uint64_t * data_start_64 = (uint64_t *) (block_start + (QK4_X / 64));
         row_data = (uint8_t * ) data_start;
 
         uint32_t offset = 0;
@@ -2195,36 +2198,111 @@ static void dequantize_row_q4_x(const uint8_t * row_data, const uint16_t row_wid
         for (int jb = 0; jb < QK4_X / 64; jb++) {
             uint64_t fp16_chooser = block_start[jb];
             
-            for (int i = 0; i < 64; i++) {
-                if (unlikely(fp16_chooser & 1)) {
-                    offset += 16;
-                    row_save[i] = (((uint32_t *) data_start)[0] >> data_offset) & ((1 << 16) - 1);
+            // all weights are quantized in this section
+            if (fp16_chooser == 0) {
+                if (data_offset == 0) {
+                    const uint8_t range = 64;
+                    // we can take a full 64bit block
+                    const uint8_t weights_per_u64_data_block = range / QK4_QBits;
+                    const uint8_t num_of_data_blocks_needed = 64 / weights_per_u64_data_block;
+                    
+                    for (int i = 0; i < num_of_data_blocks_needed; i++) {
+                        for (int k = 0; k < weights_per_u64_data_block; k ++) {
+                            row_save[i * weights_per_u64_data_block + k] = qvals_f16[(((uint64_t *) data_start)[0] >> (k * QK4_QBits)) & ((1 << 4) - 1)];
+                        }
 
-                    data_start += 1;
+                        data_start += (range / 8) / sizeof(uint16_t);
+                    }
                 } else {
-                    offset += QK4_QBits;
-                    row_save[i] = qvals_f16[(((uint32_t *) data_start)[0] >> data_offset) & ((1 << QK4_QBits) - 1)];
+                    // We are doing u32 instead of a simple u64, since data_offset may not be 0 and we need to account for that
+                    const uint8_t range = 32;
+                    const uint8_t weights_per_u32_data_block = range / QK4_QBits;
+                    const uint8_t num_of_data_blocks_needed = 64 / weights_per_u32_data_block;
 
-                    data_offset += QK4_QBits;
+                    for (int i = 0; i < num_of_data_blocks_needed; i++) {
+                        for (int k = 0; k < weights_per_u32_data_block; k ++) {
+                            // here we cast to 64bit, to make sure that we don't lose bits that are outside the u32 range
+                            row_save[i * weights_per_u32_data_block + k] = qvals_f16[(((uint64_t *) data_start)[0] >> (data_offset + k * QK4_QBits)) & ((1 << 4) - 1)];
+                        }
 
-                    if (data_offset % 16 == 0) {
-                        data_start += 1;
-                        data_offset = 0;
+                        data_start += (range / 8) / sizeof(uint16_t);
                     }
                 }
 
-                fp16_chooser >>= 1;
+                offset += QK4_QBits * 64;
+            } else {
+                int i = 0;
 
-                // uint8_t sz = QK4_QBits << ((fp16_chooser & 1) << 1);
+                if ((fp16_chooser & 0xFFFFFFFF) == 0) {
+                    if (data_offset == 0) {
+                        const uint8_t range = 64; // this is *not* the number of weights
+                        const uint8_t weights_per_u64_data_block = range / QK4_QBits;
+                        const uint8_t num_of_data_blocks_needed = 32 / weights_per_u64_data_block;
 
-                // get_bits(data_start, offset, &w, sz);
-                // offset += sz;
+                        for (int data_i = 0; data_i < num_of_data_blocks_needed; data_i++) {
+                            for (int k = 0; k < weights_per_u64_data_block; k ++) {
+                                row_save[i + data_i * weights_per_u64_data_block + k] = qvals_f16[(((uint64_t *) data_start)[0] >> (k * QK4_QBits)) & ((1 << 4) - 1)];
+                            }
 
-                // if (sz == QK4_QBits) {
-                //     row_save[i] = qvals_f16[w];
-                // } else {
-                //     row_save[i] = w;
-                // }
+                            data_start += (range / 8) / sizeof(uint16_t);
+                        }
+
+                        offset += QK4_QBits * 32;
+                        //printf("offset: %d\n", offset);
+                        i += 32;
+                        fp16_chooser >>= 32;
+                    } else {
+                        const uint8_t range = 32;
+                        const uint8_t weights_per_u32_data_block = range / QK4_QBits;
+                        const uint8_t num_of_data_blocks_needed = 32 / weights_per_u32_data_block;
+
+                        for (int data_i = 0; data_i < num_of_data_blocks_needed; data_i++) {
+                            for (int k = 0; k < weights_per_u32_data_block; k ++) {
+                                row_save[i + data_i * weights_per_u32_data_block + k] = qvals_f16[(((uint64_t *) data_start)[0] >> (data_offset + k * QK4_QBits)) & ((1 << 4) - 1)];
+                            }
+
+                            data_start += (range / 8) / sizeof(uint16_t);
+                        }
+
+                        offset += QK4_QBits * 32;
+                        //printf("offset: %d\n", offset);
+                        i += 32;
+                        fp16_chooser >>= 32;
+                    }
+                }
+
+                for (; i < 64; i++) {
+                    // next 32 values are free
+                    if (unlikely(fp16_chooser & 1)) {
+                        offset += 16;
+                        row_save[i] = (((uint32_t *) data_start)[0] >> data_offset) & ((1 << 16) - 1);
+
+                        data_start += 1;
+                    } else {
+                        offset += QK4_QBits;
+                        row_save[i] = qvals_f16[(((uint32_t *) data_start)[0] >> data_offset) & ((1 << QK4_QBits) - 1)];
+
+                        data_offset += QK4_QBits;
+
+                        if (data_offset % 16 == 0) {
+                            data_start += 1;
+                            data_offset = 0;
+                        }
+                    }
+
+                    fp16_chooser >>= 1;
+
+                    // uint8_t sz = QK4_QBits << ((fp16_chooser & 1) << 1);
+
+                    // get_bits(data_start, offset, &w, sz);
+                    // offset += sz;
+
+                    // if (sz == QK4_QBits) {
+                    //     row_save[i] = qvals_f16[w];
+                    // } else {
+                    //     row_save[i] = w;
+                    // }
+                }
             }
 
             // horrible manual loop unroll for testing, 1 iteration only
@@ -10244,9 +10322,9 @@ static void ggml_compute_forward_mul_mat_q_f32(
             
             dequantize_row_q4_x((uint8_t *) src_data + byte_offset, ne00, src_row);
 
-            for (int64_t ic = 0; ic < ne11; ++ic) {
-                ggml_vec_dot_f16_q8_0(src_row, ne00, &dst_col[ic*ne0], src1_col + ic*row_size);
-            }
+            // for (int64_t ic = 0; ic < ne11; ++ic) {
+            //     ggml_vec_dot_f16_q8_0(src_row, ne00, &dst_col[ic*ne0], src1_col + ic*row_size);
+            // }
         }
     } else {
         vec_dot_q_t      const vec_dot_q          = quantize_fns[type].vec_dot_q;
@@ -15680,7 +15758,9 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
     uint32_t row_fp16s = 0;
 
     float debug_vals[QK4_X];
-    
+    uint32_t debug_nofp16s = 0;
+    uint32_t debug_lowfp16s = 0;
+
     for (int i = 0; i < nb; i++) {
         uint64_t fp16s[QK4_X / 64];
         
@@ -15689,7 +15769,7 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
         }
 
         int fp16_count = 0;
-        float thresh = 0.05;
+        float thresh = 0.06;
 
         for (int j = 0; j < QK4_X; j++) {
             ggml_fp16_t x = src[i * QK4_X + j];
@@ -15702,8 +15782,10 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
             debug_vals[j] = x_fp32;
 
             if (fabsf(x_fp32) > thresh) {
+                // deactivate quant
                 fp16s[j / 64] |= (uint64_t) 1 << (j % 64);
                 fp16_count += 1;
+
                 //printf("%d.%d: %f should be f16\n", i, j, x_fp32);
             } else {
                 //printf("%d.%d: %f should be qbit\n", i, j, x_fp32);
@@ -15954,14 +16036,32 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
             row_fp16s = 0;
         }
 
-        // if (fp16_count > 12) {
+        if (fp16_count == 0) {
+            debug_nofp16s += 1;
+        } else if (fp16_count < 4) {
+            debug_lowfp16s += 1;
+        }
+
+        // if (fp16_count > 0 || true) {
         //     printf("quantized block %d, %d FP16s, %d 4bit vals, fin_offset: %d\n", i, fp16_count, QK4_X - fp16_count, dst_offset);
+
+        //     if (fp16_count == 2) {
+        //         for (int j = 0; j < QK4_X; j++) {
+        //             ggml_fp16_t x = src[i * QK4_X + j];
+        //             float x_fp32 = GGML_FP16_TO_FP32(x);
+
+        //             if (fp16s[j / 64] & ((uint64_t) 1 << (j % 64))) {
+        //                 printf("%f(%d) ", x_fp32, j);
+        //             }
+        //         }
+        //         printf("\n");
+        //     }
         // }
     }
     
     extra_data[n / tensor_width - 1] = dst_offset;
 
-    printf("total bytes: %ld\n", extra_data[n / tensor_width - 1]);
+    printf("total bytes: %ld, blocks w/ no fp16s: %u, blocks w/ < 4 fp16s: %u\n", extra_data[n / tensor_width - 1], debug_nofp16s, debug_lowfp16s);
     return dst_offset;
 }
 
