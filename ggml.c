@@ -2212,8 +2212,9 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
             uint64_t fp16_chooser = block_start[jb];
 
             // all weights are quantized in this section
-            if (fp16_chooser == 0 && false) {
+            if (fp16_chooser == 0) {
                 if (data_offset == 0) {
+                    // This only properly works for QBits = power of 2
                     const uint8_t data_block_size = 64;
                     // we can take a full 64bit block
                     const uint8_t weights_per_u64_data_block = data_block_size / QK4_QBits;
@@ -2279,6 +2280,24 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
                 }
             }
 
+            for (int jb = 0; jb < 64 / QK8_0; jb++) {
+                __m256 column_multiplier = _mm256_set1_ps(GGML_FP16_TO_FP32(column[column_idx].d));
+
+                for (int i = 0; i < QK8_0/8; i++) {
+                    __m128i test = _mm_loadu_si128((const __m128i *) (column[column_idx].qs + i * 8));
+                    __m256i work = _mm256_cvtepi8_epi32(test);
+                    __m256 workf = _mm256_cvtepi32_ps(work);
+                    
+                    // multiply with our 8 parts of the row at row_data
+                    __m256 row = _mm256_loadu_ps(row_ptr + jb * QK8_0 + i * 8);
+
+                    workf = _mm256_mul_ps(workf, row);
+                    rolling_sum = _mm256_fmadd_ps(workf, column_multiplier, rolling_sum);
+                }
+
+                column_idx += 1;
+            }
+
             // horrible manual loop unroll for testing, 1 iteration only
             // int i = 0;
             // uint16_t w = 0;
@@ -2286,30 +2305,6 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
             // if (unlikely(fp16_chooser & 1)) { get_bits(data_start, offset, &w, 16); offset += 16; row_save[i] = w; } else { get_bits(data_start, offset, &w, QK4_QBits); offset += QK4_QBits; row_save[i] = qvals_f16[w]; } fp16_chooser >>= 1; i++;
             
             row_ptr += 64;
-        }
-
-        for (int jb = 0; jb < QK4_X / QK8_0; jb++) {
-            float block_sum = 0;
-
-            __m256 column_multiplier = _mm256_set1_ps(GGML_FP16_TO_FP32(column[column_idx].d));
-
-            for (int i = 0; i < QK8_0/8; i++) {
-                __m128i test = _mm_loadu_si128((const __m128i *) (column[column_idx].qs + i * 8));
-                __m256i work = _mm256_cvtepi8_epi32(test);
-                __m256 workf = _mm256_cvtepi32_ps(work);
-                
-                // multiply with our 8 parts of the row at row_data
-                __m256 row = _mm256_loadu_ps(row_data + jb * QK8_0 + i * 8);
-
-                workf = _mm256_mul_ps(workf, row);
-                rolling_sum = _mm256_fmadd_ps(workf, column_multiplier, rolling_sum);
-                
-                // printf("\n");
-                // block_sum += row_data[jb * QK8_0 + i] * column[column_idx].qs[i];
-            }
-
-            //sumf += block_sum * GGML_FP16_TO_FP32(column[column_idx].d);
-            column_idx += 1;
         }
 
         //printf("offset: %d\n", offset);
