@@ -2260,7 +2260,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
                 }
 
                 if (false
-                    // || tensor.name.find(std::string(".0.attention.wk")) != std::string::npos
+                    // || tensor.name.find(std::string(".0.attention.wq")) != std::string::npos
                     // || tensor.name.find(std::string(".0.feed_forward")) != std::string::npos
                     // || tensor.name.find(std::string(".1.attention.w")) != std::string::npos
                     // || tensor.name.find(std::string(".15.attention.w")) != std::string::npos

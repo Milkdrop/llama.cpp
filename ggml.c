@@ -15883,7 +15883,10 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
         
         // update qbits
         // switch to 3bit
-        if (variance_mean <= 0.0175) {
+        if (variance_mean <= 0.01) {
+            qbits = 2;
+            recalculate_fp16s(src, i, &fp16_count, fp16s, qbits);
+        } else if (variance_mean <= 0.0175) {
             qbits = 3;
             recalculate_fp16s(src, i, &fp16_count, fp16s, qbits);
         }
