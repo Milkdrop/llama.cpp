@@ -220,7 +220,7 @@ extern "C" {
 
 // max is 256, because some feed_forward weights have a width of 11008
 #define QK4_X 256
-#define QK4_QBits 4
+// #define ame_debug
 
 #if UINTPTR_MAX == 0xFFFFFFFF
     #define GGML_MEM_ALIGN 4
