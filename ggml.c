@@ -2383,25 +2383,25 @@ static void ggml_vec_dot_q4_0_q8_0(const int n, float * restrict s, const void *
     const block_q4_0 * restrict x = vx;
     const block_q8_0 * restrict y = vy;
 
-    // forced slow implemenation, for benchmarking
-    // scalar
-    float sumf = 0.0;
+    // // forced slow implemenation, for benchmarking
+    // // scalar
+    // float sumf = 0.0;
 
-    for (int i = 0; i < nb; i++) {
-        int sumi = 0;
+    // for (int i = 0; i < nb; i++) {
+    //     int sumi = 0;
 
-        for (int j = 0; j < qk/2; ++j) {
-            const int v0 = (x[i].qs[j] & 0x0F) - 8;
-            const int v1 = (x[i].qs[j] >>   4) - 8;
+    //     for (int j = 0; j < qk/2; ++j) {
+    //         const int v0 = (x[i].qs[j] & 0x0F) - 8;
+    //         const int v1 = (x[i].qs[j] >>   4) - 8;
 
-            sumi += (v0 * y[i].qs[j]) + (v1 * y[i].qs[j + qk/2]);
-        }
+    //         sumi += (v0 * y[i].qs[j]) + (v1 * y[i].qs[j + qk/2]);
+    //     }
 
-        sumf += sumi*GGML_FP16_TO_FP32(x[i].d)*GGML_FP16_TO_FP32(y[i].d);
-    }
+    //     sumf += sumi*GGML_FP16_TO_FP32(x[i].d)*GGML_FP16_TO_FP32(y[i].d);
+    // }
 
-    *s = sumf;
-    return;
+    // *s = sumf;
+    // return;
 
 #if defined(__ARM_NEON)
     float32x4_t sumv0 = vdupq_n_f32(0.0f);
