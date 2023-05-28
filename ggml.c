@@ -2268,10 +2268,6 @@ static void ggml_vec_dot_f16_q8_0(uint16_t* src_row, const uint16_t row_width, f
     *result = sumf;
 }
 
-static void ggml_vec_dot_q4_x_q8_0(uint8_t * row_data, const uint16_t row_width, float * restrict result, const uint8_t * restrict column_ptr) {
-    
-}
-
 static void ggml_vec_dot_q4_0_q8_0(const int n, float * restrict s, const void * restrict vx, const void * restrict vy) {
     const int qk = QK8_0;
     const int nb = n / qk;
@@ -15697,6 +15693,11 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
 
         for (int j = 0; j < QK4_X; j++) {
             ggml_fp16_t x = src[i * QK4_X + j];
+
+            // if (x < 32) {
+            //     printf("!!! A weight is < 32: %d\n", x);
+            // }
+
             float x_fp32 = GGML_FP16_TO_FP32(x);
             debug_vals[j] = x_fp32;
 
