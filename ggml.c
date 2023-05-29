@@ -15818,7 +15818,7 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
     uint32_t debug_lowfp16s = 0;
 
     uint32_t block_bits[9];
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 9; i++) {
         block_bits[i] = 0;
     }
 
@@ -15873,7 +15873,7 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
         }
 
         float min_value = -(max_quantization_error_8 * ((1 << qbits) - 1));
-        float mult_range = 2 * max_quantization_error_8;
+        float mult_range = 2 * max_quantization_error_8 * ((1 << qbits) - 1);
         
         for (uint8_t test_qbit = 6; test_qbit >= 1; test_qbit--) {
             double mean = 0;
@@ -15914,8 +15914,28 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
                 total_bits = total_bits_in_test_qbit;
                 qbits = test_qbit;
 
-                min_value = -(max_quantization_errors[test_qbit] * ((1 << qbits) - 1));
-                mult_range = 2 * max_quantization_errors[test_qbit];
+                min_value = mean - (max_quantization_errors[test_qbit] * ((1 << qbits) - 1));
+                mult_range = 2 * max_quantization_errors[test_qbit] * ((1 << qbits) - 1);
+
+                for (int j = 0; j < QK4_X; j++) {
+                    if ((fp16s[j / 64] & ((uint64_t) 1 << (j % 64))) == 0) {
+                        ggml_fp16_t x = src[i * QK4_X + j];
+                        float x_fp32 = GGML_FP16_TO_FP32(x);
+
+                        // this weight would need to be put on 16bit
+                        if (x_fp32 < mean - thresh || x_fp32 > mean + thresh) {
+                            fp16s[j / 64] |= (uint64_t) 1 << (j % 64);
+                            fp16_count += 1;
+                        }
+                    }
+                }
+
+                uint16_t total_test_bits = fp16_count * 16 + (QK4_X - fp16_count) * qbits;
+                while ((total_test_bits % 8) != 0) {
+                    total_test_bits += 16 - test_qbit; // simulate the replacement of a 3bit weight with a 16bit one
+                }
+
+                GGML_ASSERT(total_bits == total_test_bits);
             }
         }
 
@@ -16057,10 +16077,10 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
                     fprintf(debug_fp, "%f ", diff); // this should be equal to min_dist actually
                 }
 
-                // if (diff >= 0.01) {
-                //     print_vals = 1;
-                //     printf("%f -> %d -> %f, diff = %f\n", x_fp32, q, qvals[q], diff);
-                // }
+                if (diff >= 0.004) {
+                    print_vals = 1;
+                    printf("%f -> %d -> %f, diff = %f\n", x_fp32, q, qvals[q], diff);
+                }
             }
         }
         
