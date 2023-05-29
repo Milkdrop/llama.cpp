@@ -2222,8 +2222,33 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
             uint64_t fp16_chooser = block_start[jb];
 
             // all weights are quantized in this section; ALSO this ONLY works when qbits is <= 4, since (qbits != 3) simply checks if qbits is a power of 2
-            if (fp16_chooser == 0 && (qbits != 3)) {
-                if (data_offset == 0) {
+            if (fp16_chooser == 0) {
+                if (qbits == 3) {
+                    // same principle as on the regular data_offset branch, but this time the qbits cross byte boundaries, so we need to manage it by hand
+                    for (int i = 0; i < 5; i++) {
+                        for (int k = 0; k < 11; k ++) {
+                            // here we cast to 64bit, to make sure that we don't lose bits that are outside the u32 range
+                            row_ptr[i * 11 + k] = qvals[((((uint64_t *) data_start)[0] >> (data_offset + k * qbits)) & ((1 << qbits) - 1))];
+                        }
+
+                        data_start += 2; // this is the same event as in if (data_start >= 16), but happening twice, stealthily
+                        data_offset += 1; // it's actually +33, but we are rounding
+                    }
+
+                    for (int k = 0; k < 9; k ++) {
+                        // here we cast to 64bit, to make sure that we don't lose bits that are outside the u32 range
+                        row_ptr[55 + k] = qvals[((((uint64_t *) data_start)[0] >> (data_offset + k * qbits)) & ((1 << qbits) - 1))];
+                    }
+
+                    data_start += 1;
+                    data_offset += 9 * 3 - 16;
+
+                    if (data_offset >= 16) {
+                        data_start += 1;
+                        data_offset -= 16;
+                    }
+
+                } else if (data_offset == 0) {
                     // This only properly works for QBits = power of 2
                     const uint8_t data_block_size = 64;
                     // we can take a full 64bit block
@@ -2232,8 +2257,7 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
                     
                     for (int i = 0; i < num_of_data_blocks_needed; i++) {
                         for (int k = 0; k < weights_per_u64_data_block; k ++) {
-                            uint8_t value = (((uint64_t *) data_start)[0] >> (k * qbits)) & ((1 << qbits) - 1);
-                            row_ptr[i * weights_per_u64_data_block + k] = qvals[value];
+                            row_ptr[i * weights_per_u64_data_block + k] = qvals[(((uint64_t *) data_start)[0] >> (k * qbits)) & ((1 << qbits) - 1)];
                         }
 
                         data_start += (data_block_size / 8) / sizeof(uint16_t);
@@ -2247,8 +2271,7 @@ static void ggml_vec_dot_q4_x_q8_0(const uint8_t * quant_row, const uint16_t row
                     for (int i = 0; i < num_of_data_blocks_needed; i++) {
                         for (int k = 0; k < weights_per_u32_data_block; k ++) {
                             // here we cast to 64bit, to make sure that we don't lose bits that are outside the u32 range
-                            uint8_t value = ((((uint64_t *) data_start)[0] >> (data_offset + k * qbits)) & ((1 << qbits) - 1));
-                            row_ptr[i * weights_per_u32_data_block + k] = qvals[value];
+                            row_ptr[i * weights_per_u32_data_block + k] = qvals[((((uint64_t *) data_start)[0] >> (data_offset + k * qbits)) & ((1 << qbits) - 1))];
                         }
 
                         data_start += (data_block_size / 8) / sizeof(uint16_t);
