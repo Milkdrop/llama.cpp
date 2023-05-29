@@ -15799,8 +15799,9 @@ static inline void recalculate_fp16s(const ggml_fp16_t * src, int i, int * fp16_
 
 size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k, int64_t * hist, uint64_t * extra_data, uint32_t tensor_width, FILE* debug_fp) {
     GGML_ASSERT(n == k);
-
     uint8_t * dst = (uint8_t*) dst_void;
+    //printf("src:%p, dst: %p, extra_data: %p, debug_fp: %p (null: %d)\n", src, dst, extra_data, debug_fp, debug_fp == NULL);
+
     assert(k % QK4_X == 0);
     const int nb = n / QK4_X;
     
@@ -15961,6 +15962,7 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
 
         // write the data
         for (int j = 0; j < QK4_X / 64; j++) {
+            // printf("write %d/%d at %p:\n", j, QK4_X / 64, fp16_data + j);
             fp16_data[j] = fp16s[j];
         }
 

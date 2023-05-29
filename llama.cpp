@@ -644,6 +644,7 @@ struct llama_file_saver {
 
         file.seek(-static_cast<ptrdiff_t>(file.tell()) & 31, SEEK_CUR);
         // printf("new_size %zu vs tensor size %zu\n", new_size, tensor_size);
+        
         LLAMA_ASSERT(new_size == tensor_size);
         file.write_raw(new_data, new_size);
 
@@ -2179,6 +2180,8 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
     }
 
     // this is preferred since the data isn't really easy to section up, esp. when we don't know how long (in bits) a row is yet
+    // note: this doesn't work even in the case of tensor parallelization, as an implementation was tried below; We don't know the
+    // size of a tensor, which means we have to do everything in 1 thread
     if (quantized_type == GGML_TYPE_Q4_X) {
         nthread = 1;
         printf("Setting nthread to 1 due to Q4_X quantization type.\n");
@@ -2198,10 +2201,22 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
     std::mutex mutex;
 
     size_t idx = 0;
+    
+    int workers_used = 0;
+    int work_id = 0;
+
+    // more than 4 runs out of memory, todo need an automatic way of adjusting this
+    int max_qx_workers = 4;
+    max_qx_workers = std::min(max_qx_workers, nthread);
+
+    llama_buffer work[max_qx_workers];
+    
+    llama_buffer read_data[max_qx_workers];
+    llama_buffer f32_conv_buf[max_qx_workers];
+
     for (llama_load_tensor & tensor : model_loader->tensors_map.tensors) {
-        llama_buffer read_data;
-        read_data.resize(tensor.size);
-        tensor.data = read_data.addr;
+        read_data[work_id].resize(tensor.size);
+        tensor.data = read_data[work_id].addr;
         model_loader->load_data_for(tensor);
 
         printf("[%4zu/%4zu] %36s - %16s, type = %6s, ",
@@ -2230,7 +2245,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
         enum ggml_type new_type;
         void * new_data;
         size_t new_size;
-        llama_buffer work;
+
         uint64_t * extra_data = NULL;
 
         FILE* debug_fp = NULL;
@@ -2246,13 +2261,12 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
             const ggml_fp16_t * f16_data;
 
             size_t nelements = tensor.ne.at(0) * tensor.ne.at(1);
-            llama_buffer f32_conv_buf;
             if (tensor.type == GGML_TYPE_F32) {
                 f32_data = (float *) tensor.data;
                 f16_data = NULL;
             } else if (tensor.type == GGML_TYPE_F16) {
-                f32_conv_buf.resize(nelements * sizeof(float));
-                f32_data = (float *) f32_conv_buf.addr;
+                f32_conv_buf[work_id].resize(nelements * sizeof(float));
+                f32_data = (float *) f32_conv_buf[work_id].addr;
                 f16_data = (ggml_fp16_t *) tensor.data;
 
                 for (size_t i = 0; i < nelements; i++) {
@@ -2288,23 +2302,66 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
                 throw format("type %s unsupported for integer quantization", ggml_type_name(tensor.type));
             }
 
-            printf("quantizing .. ");
+            printf("quantizing...");
             fflush(stdout);
 
-            work.resize(nelements * 4); // upper bound on size
-            new_data = work.addr;
+            work[work_id].resize(nelements * 4); // upper bound on size
+            new_data = work[work_id].addr;
+            // printf("\ndata: %p\n", new_data);
+
             std::vector<int64_t> hist_cur(1 << 4, 0);
 
             int chunk_size = 32 * 512;
             const int nchunk = (nelements + chunk_size - 1)/chunk_size;
             const int nthread_use = nthread > 1 ? std::max(1, std::min(nthread, nchunk)) : 1;
-
+            
             if (new_type == GGML_TYPE_Q4_X) {
                 extra_data = (uint64_t *) ggml_aligned_malloc(sizeof(uint64_t) * tensor.ne[1]);
+
+                if (nthread_use >= 2) {
+                    if ((int) workers.size() < max_qx_workers) {
+                        workers.resize(max_qx_workers);
+                    }
+
+                    if (workers_used >= max_qx_workers) {
+                        for (int it = 0; it < max_qx_workers; ++it) {
+                            if (workers[it].joinable()) {
+                                workers[it].join();
+                            }
+                        }
+
+                        workers_used = 0;
+                    }
+                }
             }
 
             if (nthread_use < 2) {
                 new_size = ggml_quantize_chunk(new_type, f16_data, f32_data, new_data, 0, nelements, hist_cur.data(), extra_data, tensor.ne[0], debug_fp);
+            } else if (new_type == GGML_TYPE_Q4_X) {
+                auto const compute = [&file_saver, &tensor, new_type, f16_data, f32_data, &hist_cur, &new_data, nelements, extra_data, debug_fp] () {
+                    size_t new_size = ggml_quantize_chunk(new_type, f16_data, f32_data, new_data, 0, nelements, hist_cur.data(), extra_data, tensor.ne[0], debug_fp);
+                    
+                    if (debug_fp != NULL) {
+                        fclose(debug_fp);
+                    }
+
+                    printf("%s size = %8.2f MB -> %8.2f MB\n", tensor.name.c_str(), tensor.size/1024.0/1024.0, new_size/1024.0/1024.0);
+
+                    file_saver.write_tensor(tensor, new_type, new_data, new_size, extra_data);
+                };
+
+                workers[workers_used++] = std::thread(compute);
+                work_id++;
+
+                if (work_id >= max_qx_workers) {
+                    for (int it = 0; it < workers_used; ++it) {
+                        if (workers[it].joinable()) {
+                            workers[it].join();
+                        }
+                    }
+
+                    work_id = 0;
+                }
             } else {
                 size_t counter = 0;
                 new_size = 0;
@@ -2343,10 +2400,13 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
                 }
             }
 
-            if (debug_fp != NULL) {
-                fclose(debug_fp);
+            if (nthread <= 1 || new_type != GGML_TYPE_Q4_X) {
+                if (debug_fp != NULL) {
+                    fclose(debug_fp);
+                }
+
+                printf("size = %8.2f MB -> %8.2f MB", tensor.size/1024.0/1024.0, new_size/1024.0/1024.0);
             }
-            printf("size = %8.2f MB -> %8.2f MB", tensor.size/1024.0/1024.0, new_size/1024.0/1024.0);
 
             if (new_type != GGML_TYPE_Q4_X) {
                 printf(" | hist: ");
@@ -2358,17 +2418,22 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
                     printf("%5.3f ", hist_cur[i] / float(nelements));
                 }
             }
-
             printf("\n");
         }
-        total_size_org += tensor.size;
-        total_size_new += new_size;
-
-        printf("total model size = %8.2f MB\n", total_size_new/1024.0/1024.0);
         
-        file_saver.write_tensor(tensor, new_type, new_data, new_size, extra_data);
+        if (nthread <= 1 || new_type != GGML_TYPE_Q4_X) {
+            total_size_org += tensor.size;
+            total_size_new += new_size;
+
+            printf("total model size = %8.2f MB\n", total_size_new/1024.0/1024.0);
+            file_saver.write_tensor(tensor, new_type, new_data, new_size, extra_data);
+        }
     }
 
+    for (int it = 0; it < workers_used; ++it) {
+        workers[it].join();
+    }
+    
     printf("%s: model size  = %8.2f MB\n", __func__, total_size_org/1024.0/1024.0);
     printf("%s: quant size  = %8.2f MB\n", __func__, total_size_new/1024.0/1024.0);
     {
