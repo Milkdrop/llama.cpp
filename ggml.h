@@ -223,9 +223,8 @@ extern "C" {
 // #define ame_debug
 
 // temporary place for ggml_quantize_q4_x variables:
-#define F16_THRESHOLD 0.05
-#define VARIANCE_MEAN_FLOOR_2BIT 0.01
-#define VARIANCE_MEAN_FLOOR_3BIT 0.0175
+#define STARTING_QBITS 4
+#define STARTING_QBITS_DOWNSCALING 2
 
 #if UINTPTR_MAX == 0xFFFFFFFF
     #define GGML_MEM_ALIGN 4

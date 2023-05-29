@@ -15848,7 +15848,8 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
         block_bits[i] = 0;
     }
 
-    double max_quantization_errors[5] = {0, 0.004, 0.004, 0.003, 0.002};
+    //double max_quantization_errors[5] = {0, 0.004, 0.004, 0.003, 0.002};
+    double max_quantization_errors[5] = {0, 0.005, 0.005, 0, 0.003};
 
     for (int i = 0; i < nb; i++) {
         uint64_t fp16s[QK4_X / 64];
@@ -15856,7 +15857,7 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
         // uint8_t qbits = 8;
         // float thresh = max_quantization_error_8 * (1 << qbits);
         
-        uint8_t qbits = 4;
+        uint8_t qbits = STARTING_QBITS;
         float thresh = max_quantization_errors[qbits] * (1 << qbits);
 
         for (int j = 0; j < QK4_X / 64; j++) {
@@ -15904,7 +15905,7 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
         float min_value = -(max_quantization_errors[qbits] * ((1 << qbits) - 1));
         float mult_range = 2 * max_quantization_errors[qbits] * ((1 << qbits) - 1);
         
-        for (uint8_t test_qbit = 3; test_qbit >= 1; test_qbit--) {
+        for (uint8_t test_qbit = STARTING_QBITS_DOWNSCALING; test_qbit >= 1; test_qbit--) {
             double mean = 0;
             for (int j = 0; j < QK4_X; j++) {
                 if ((fp16s[j / 64] & ((uint64_t) 1 << (j % 64))) == 0) {
@@ -16107,10 +16108,10 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
                     fprintf(debug_fp, "%f ", diff); // this should be equal to min_dist actually
                 }
 
-                if (diff >= 0.004) {
-                    print_vals = 1;
-                    printf("%f -> %d -> %f, diff = %f\n", x_fp32, q, qvals[q], diff);
-                }
+                // if (diff >= 0.004) {
+                    // print_vals = 1;
+                    // printf("%f -> %d -> %f, diff = %f\n", x_fp32, q, qvals[q], diff);
+                // }
             }
         }
         
