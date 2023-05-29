@@ -15839,6 +15839,8 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
         // its quantized value;
         // that means, the total range for the quantized values will be max_quantization_error * 2 * (1 << qbits) (here, 16)
         // for simplicty, we are going to center on 0, meaning that our fp16 threshold will be max_quantization_error * 16 values to the left and right
+        // -->|<---->|<---->|<---->|<-- 4bit example, --> = max_quant_error; we have "--> * 2 * 3 + --> + -->" positions where quantized values can be, == "--> * 4"
+
         float thresh = max_quantization_error_8 * (1 << qbits);
 
         for (int j = 0; j < QK4_X; j++) {
@@ -15870,6 +15872,9 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
             total_bits += 16 - qbits; // simulate the replacement of a 3bit weight with a 16bit one
         }
 
+        float min_value = -(max_quantization_error_8 * ((1 << qbits) - 1));
+        float mult_range = 2 * max_quantization_error_8;
+        
         for (uint8_t test_qbit = 6; test_qbit >= 1; test_qbit--) {
             double mean = 0;
             for (int j = 0; j < QK4_X; j++) {
@@ -15908,6 +15913,9 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
 
                 total_bits = total_bits_in_test_qbit;
                 qbits = test_qbit;
+
+                min_value = -(max_quantization_errors[test_qbit] * ((1 << qbits) - 1));
+                mult_range = 2 * max_quantization_errors[test_qbit];
             }
         }
 
@@ -15937,31 +15945,6 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
         }
 
         dst_offset += (QK4_X / 64) * sizeof(uint64_t);
-
-        float min_value = 10000;
-        float max_value = -10000;
-        float mult_range = 0;
-        
-        for (int j = 0; j < QK4_X; j++) {
-            // weight not on 16bit
-            if ((fp16s[j / 64] & ((uint64_t) 1 << (j % 64))) == 0) {
-                ggml_fp16_t x = src[i * QK4_X + j];
-                float x_fp32 = GGML_FP16_TO_FP32(x);
-
-                if (x_fp32 < min_value) {
-                    min_value = x_fp32;
-                }
-
-                if (x_fp32 > max_value) {
-                    max_value = x_fp32;
-                }
-            }
-        }
-
-        // min value and max value should be under the thresh
-        GGML_ASSERT(min_value <= 0);
-
-        mult_range = max_value - min_value;
         
         // min_value = 3 bit, max_value = 3 bit, 
         
