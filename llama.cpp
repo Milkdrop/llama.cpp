@@ -2230,9 +2230,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
         // consider tok_embeddings.weight and output.weight
 
         // quantize only 2D attention and FFN stuffs
-        if (tensor.name.find("attention") == std::string::npos && tensor.name.find("feed_forward") == std::string::npos) {
-            quantize = false;
-        }
+        // if (tensor.name.find("attention") == std::string::npos && tensor.name.find("feed_forward") == std::string::npos) {
+        //     quantize = false;
+        // }
 
         // quantize only 2D tensors
         quantize &= (tensor.ne.size() == 2);
