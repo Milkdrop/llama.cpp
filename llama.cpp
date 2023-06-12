@@ -2214,6 +2214,20 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
     llama_buffer read_data[max_qx_workers];
     llama_buffer f32_conv_buf[max_qx_workers];
 
+    // 0.001
+    // 0.005
+    // 0.01
+    // 0.05
+    // 0.1
+    // 0.5
+    // 1
+    // 5
+
+    uint64_t debug_groups[8];
+    for (int i = 0; i < 8; i += 1) {
+        debug_groups[i] = 0;
+    }
+
     for (llama_load_tensor & tensor : model_loader->tensors_map.tensors) {
         read_data[work_id].resize(tensor.size);
         tensor.data = read_data[work_id].addr;
@@ -2336,10 +2350,10 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
             }
 
             if (nthread_use < 2) {
-                new_size = ggml_quantize_chunk(new_type, f16_data, f32_data, new_data, 0, nelements, hist_cur.data(), extra_data, tensor.ne[0], debug_fp);
+                new_size = ggml_quantize_chunk(new_type, f16_data, f32_data, new_data, 0, nelements, hist_cur.data(), extra_data, tensor.ne[0], debug_fp, debug_groups);
             } else if (new_type == GGML_TYPE_Q4_X) {
-                auto const compute = [&file_saver, &tensor, new_type, f16_data, f32_data, &hist_cur, &new_data, nelements, extra_data, debug_fp] () {
-                    size_t new_size = ggml_quantize_chunk(new_type, f16_data, f32_data, new_data, 0, nelements, hist_cur.data(), extra_data, tensor.ne[0], debug_fp);
+                auto const compute = [&file_saver, &tensor, new_type, f16_data, f32_data, &hist_cur, &new_data, nelements, &debug_groups, extra_data, debug_fp] () {
+                    size_t new_size = ggml_quantize_chunk(new_type, f16_data, f32_data, new_data, 0, nelements, hist_cur.data(), extra_data, tensor.ne[0], debug_fp, debug_groups);
                     
                     if (debug_fp != NULL) {
                         fclose(debug_fp);
@@ -2365,7 +2379,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
             } else {
                 size_t counter = 0;
                 new_size = 0;
-                auto compute = [&mutex, &counter, &hist_cur, debug_fp, extra_data, &new_size, tensor, new_type, f16_data, f32_data, new_data, nelements, chunk_size] () {
+                auto compute = [&mutex, &counter, &hist_cur, debug_fp, extra_data, &new_size, tensor, new_type, f16_data, f32_data, new_data, nelements, chunk_size, &debug_groups] () {
                     std::vector<int64_t> local_hist;
                     size_t local_size = 0;
                     while (true) {
@@ -2385,7 +2399,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
                         if (local_hist.empty()) {
                             local_hist.resize(hist_cur.size(), 0);
                         }
-                        local_size += ggml_quantize_chunk(new_type, f16_data, f32_data, new_data, first, last - first, local_hist.data(), extra_data, tensor.ne[0], debug_fp);
+                        local_size += ggml_quantize_chunk(new_type, f16_data, f32_data, new_data, first, last - first, local_hist.data(), extra_data, tensor.ne[0], debug_fp, debug_groups);
                     }
                 };
                 if ((int) workers.size() < nthread_use - 1) {
@@ -2448,6 +2462,12 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
         }
         printf("\n");
     }
+
+    printf("debug_groups:\n");
+    for (int i = 0; i < 8; i += 1) {
+        printf("%lu ", debug_groups[i]);
+    }
+    printf("\n");
 }
 
 //

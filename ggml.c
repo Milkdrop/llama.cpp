@@ -2408,25 +2408,25 @@ static void ggml_vec_dot_q4_0_q8_0(const int n, float * restrict s, const void *
     const block_q4_0 * restrict x = vx;
     const block_q8_0 * restrict y = vy;
 
-    // // forced slow implemenation, for benchmarking
-    // // scalar
-    // float sumf = 0.0;
+    // forced slow implemenation, for benchmarking
+    // scalar
+    float sumf = 0.0;
 
-    // for (int i = 0; i < nb; i++) {
-    //     int sumi = 0;
+    for (int i = 0; i < nb; i++) {
+        int sumi = 0;
 
-    //     for (int j = 0; j < qk/2; ++j) {
-    //         const int v0 = (x[i].qs[j] & 0x0F) - 8;
-    //         const int v1 = (x[i].qs[j] >>   4) - 8;
+        for (int j = 0; j < qk/2; ++j) {
+            const int v0 = (x[i].qs[j] & 0x0F) - 8;
+            const int v1 = (x[i].qs[j] >>   4) - 8;
 
-    //         sumi += (v0 * y[i].qs[j]) + (v1 * y[i].qs[j + qk/2]);
-    //     }
+            sumi += (v0 * y[i].qs[j]) + (v1 * y[i].qs[j + qk/2]);
+        }
 
-    //     sumf += sumi*GGML_FP16_TO_FP32(x[i].d)*GGML_FP16_TO_FP32(y[i].d);
-    // }
+        sumf += sumi*GGML_FP16_TO_FP32(x[i].d)*GGML_FP16_TO_FP32(y[i].d);
+    }
 
-    // *s = sumf;
-    // return;
+    *s = sumf;
+    return;
 
 #if defined(__ARM_NEON)
     float32x4_t sumv0 = vdupq_n_f32(0.0f);
@@ -15822,7 +15822,7 @@ static inline void recalculate_fp16s(const ggml_fp16_t * src, int i, int * fp16_
     }
 }
 
-size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k, int64_t * hist, uint64_t * extra_data, uint32_t tensor_width, FILE* debug_fp) {
+size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k, int64_t * hist, uint64_t * extra_data, uint32_t tensor_width, FILE* debug_fp, uint64_t* debug_groups) {
     GGML_ASSERT(n == k);
     uint8_t * dst = (uint8_t*) dst_void;
     //printf("src:%p, dst: %p, extra_data: %p, debug_fp: %p (null: %d)\n", src, dst, extra_data, debug_fp, debug_fp == NULL);
@@ -15842,14 +15842,15 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
     float debug_vals[QK4_X];
     uint32_t debug_nofp16s = 0;
     uint32_t debug_lowfp16s = 0;
-
+    
     uint32_t block_bits[9];
     for (int i = 0; i < 9; i++) {
         block_bits[i] = 0;
     }
 
     //double max_quantization_errors[5] = {0, 0.004, 0.004, 0.003, 0.002};
-    double max_quantization_errors[5] = {0, 0.005, 0.005, 0, 0.003};
+    //double max_quantization_errors[5] = {0, 0.005, 0.005, 0, 0.003};
+    double max_quantization_errors[5] = {0, 0.002, 0.002, 0, 0.002};
 
     for (int i = 0; i < nb; i++) {
         uint64_t fp16s[QK4_X / 64];
@@ -15881,6 +15882,26 @@ size_t ggml_quantize_q4_x(const ggml_fp16_t * src, void * dst_void, int n, int k
             // }
 
             float x_fp32 = GGML_FP16_TO_FP32(x);
+
+            if (fabsf(x_fp32) <= 0.001) {
+                debug_groups[0] += 1;
+            } else if (fabsf(x_fp32) <= 0.005) {
+                debug_groups[1] += 1;
+            }  else if (fabsf(x_fp32) <= 0.01) {
+                debug_groups[2] += 1;
+            }  else if (fabsf(x_fp32) <= 0.05) {
+                debug_groups[3] += 1;
+            }  else if (fabsf(x_fp32) <= 0.1) {
+                debug_groups[4] += 1;
+            }  else if (fabsf(x_fp32) <= 0.5) {
+                debug_groups[5] += 1;
+            }  else if (fabsf(x_fp32) <= 1) {
+                debug_groups[6] += 1;
+            }
+            
+            if (fabsf(x_fp32) * 10000 > debug_groups[7]) {
+                debug_groups[7] = fabsf(x_fp32) * 10000;
+            }
 
             debug_vals[j] = x_fp32;
 
@@ -16371,7 +16392,7 @@ size_t ggml_quantize_q8_0(const float * src, void * dst, int n, int k, int64_t *
     return (n/QK8_0*sizeof(block_q8_0));
 }
 
-size_t ggml_quantize_chunk(enum ggml_type type, const ggml_fp16_t * src_raw, const float * src, void * dst, int start, int n, int64_t * hist, uint64_t * extra_data, uint32_t tensor_width, FILE* debug_fp) {
+size_t ggml_quantize_chunk(enum ggml_type type, const ggml_fp16_t * src_raw, const float * src, void * dst, int start, int n, int64_t * hist, uint64_t * extra_data, uint32_t tensor_width, FILE* debug_fp, uint64_t* debug_groups) {
     size_t result = 0;
     switch (type) {
         case GGML_TYPE_Q4_0:
@@ -16384,7 +16405,7 @@ size_t ggml_quantize_chunk(enum ggml_type type, const ggml_fp16_t * src_raw, con
             {
                 // For Q4_X we quantize only the entire tensor at once
                 GGML_ASSERT(start == 0);
-                result = ggml_quantize_q4_x(src_raw, dst, n, n, hist, extra_data, tensor_width, debug_fp);
+                result = ggml_quantize_q4_x(src_raw, dst, n, n, hist, extra_data, tensor_width, debug_fp, debug_groups);
             } break;
         case GGML_TYPE_Q4_1:
             {
